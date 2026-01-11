@@ -47,7 +47,7 @@ const upload = multer({
 const chunkUpload = multer({
     storage,
     limits: {
-        fileSize: 20 * 1024 * 1024, // 20MB to allow some overhead
+        fileSize: 36 * 1024 * 1024, // 36MB to allow some overhead for 32MB chunks
     },
 });
 
