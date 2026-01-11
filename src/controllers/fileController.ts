@@ -6,6 +6,52 @@ import { Api } from 'telegram';
 import fs from 'fs';
 import path from 'path';
 
+// Helper to generate unique filename for duplicates
+const getUniqueFilename = async (
+    originalName: string,
+    folderId: string | null,
+    userId: string
+): Promise<string> => {
+    // Split name and extension
+    const lastDotIndex = originalName.lastIndexOf('.');
+    const baseName = lastDotIndex > 0 ? originalName.substring(0, lastDotIndex) : originalName;
+    const extension = lastDotIndex > 0 ? originalName.substring(lastDotIndex) : '';
+
+    // Check if file with same name exists
+    const existingFile = await prisma.file.findFirst({
+        where: {
+            name: originalName,
+            folderId,
+            userId,
+        },
+    });
+
+    if (!existingFile) {
+        return originalName;
+    }
+
+    // Find the next available number
+    let counter = 1;
+    let newName = `${baseName} (${counter})${extension}`;
+
+    while (true) {
+        const exists = await prisma.file.findFirst({
+            where: {
+                name: newName,
+                folderId,
+                userId,
+            },
+        });
+
+        if (!exists) {
+            return newName;
+        }
+
+        counter++;
+        newName = `${baseName} (${counter})${extension}`;
+    }
+};
+
 export const getFiles = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const userId = req.userId;
@@ -125,10 +171,17 @@ export const uploadFile = async (req: AuthRequest, res: Response): Promise<void>
             }
         }
 
+        // Get unique filename (auto-rename if duplicate)
+        const uniqueFilename = await getUniqueFilename(
+            file.originalname,
+            folderId || null,
+            userId
+        );
+
         // Save file metadata to database
         const savedFile = await prisma.file.create({
             data: {
-                name: file.originalname,
+                name: uniqueFilename,
                 size: BigInt(file.size),
                 mimeType: file.mimetype,
                 telegramFileId,

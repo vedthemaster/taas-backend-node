@@ -2,6 +2,13 @@ import { Response } from 'express';
 import prisma from '../lib/prisma';
 import { AuthRequest } from '../middleware/authMiddleware';
 
+// Helper to convert BigInt to string for JSON serialization
+const serializeBigInt = (obj: any): any => {
+    return JSON.parse(JSON.stringify(obj, (key, value) =>
+        typeof value === 'bigint' ? value.toString() : value
+    ));
+};
+
 export const getFolders = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const userId = req.userId;
@@ -91,7 +98,7 @@ export const getFolder = async (req: AuthRequest, res: Response): Promise<void> 
             }
         }
 
-        res.json({ folder, breadcrumbs });
+        res.json(serializeBigInt({ folder, breadcrumbs }));
     } catch (error) {
         console.error('Get folder error:', error);
         res.status(500).json({ error: 'Failed to get folder' });
