@@ -43,11 +43,11 @@ const upload = multer({
     },
 });
 
-// Chunked upload for large files (16MB chunks)
+// Chunked upload for large files (32MB chunks)
 const chunkUpload = multer({
     storage,
     limits: {
-        fileSize: 36 * 1024 * 1024, // 36MB to allow some overhead for 32MB chunks
+        fileSize: 40 * 1024 * 1024, // 40MB to allow overhead for 32MB chunks
     },
 });
 
