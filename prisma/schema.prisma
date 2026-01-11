@@ -47,19 +47,36 @@ model Folder {
 }
 
 model File {
-  id              String   @id @default(uuid())
+  id              String       @id @default(uuid())
   name            String
   size            BigInt
   mimeType        String
-  telegramFileId  String
-  telegramMsgId   Int
+  telegramFileId  String?      // null for chunked files
+  telegramMsgId   Int?         // null for chunked files
+  isChunked       Boolean      @default(false)
+  totalChunks     Int?
   folderId        String?
   userId          String
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  folder          Folder?  @relation(fields: [folderId], references: [id], onDelete: SetNull)
-  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  folder          Folder?      @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chunks          FileChunk[]
 
   @@index([userId])
   @@index([folderId])
+}
+
+model FileChunk {
+  id              String   @id @default(uuid())
+  fileId          String
+  chunkIndex      Int
+  telegramFileId  String
+  telegramMsgId   Int
+  size            BigInt
+  createdAt       DateTime @default(now())
+  file            File     @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+  @@unique([fileId, chunkIndex])
+  @@index([fileId])
 }

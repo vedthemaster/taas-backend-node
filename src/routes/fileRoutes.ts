@@ -9,6 +9,13 @@ import {
     downloadFile,
     deleteFile
 } from '../controllers/fileController';
+import {
+    initChunkedUpload,
+    uploadChunk,
+    completeChunkedUpload,
+    cancelChunkedUpload,
+    downloadChunkedFile
+} from '../controllers/chunkedUploadController';
 import { authMiddleware } from '../middleware/authMiddleware';
 
 const router = Router();
@@ -36,10 +43,28 @@ const upload = multer({
     },
 });
 
+// Chunked upload for large files (16MB chunks)
+const chunkUpload = multer({
+    storage,
+    limits: {
+        fileSize: 20 * 1024 * 1024, // 20MB to allow some overhead
+    },
+});
+
+// Standard file routes
 router.get('/', authMiddleware, getFiles);
 router.get('/:id', authMiddleware, getFile);
 router.post('/upload', authMiddleware, upload.single('file'), uploadFile);
 router.get('/:id/download', authMiddleware, downloadFile);
 router.delete('/:id', authMiddleware, deleteFile);
+
+// Chunked upload routes
+router.post('/upload/init', authMiddleware, initChunkedUpload);
+router.post('/upload/chunk/:uploadId', authMiddleware, chunkUpload.single('chunk'), uploadChunk);
+router.post('/upload/complete/:uploadId', authMiddleware, completeChunkedUpload);
+router.delete('/upload/:uploadId', authMiddleware, cancelChunkedUpload);
+
+// Streaming download for chunked files
+router.get('/:id/download/stream', authMiddleware, downloadChunkedFile);
 
 export default router;
