@@ -5,7 +5,7 @@ import { uploadToTelegram } from '../lib/pythonService';
 import fs from 'fs';
 import path from 'path';
 
-const CHUNK_SIZE = 16 * 1024 * 1024; // 16 MB
+const CHUNK_SIZE = 32 * 1024 * 1024; // 32 MB
 const CHUNK_THRESHOLD = 100 * 1024 * 1024; // 100 MB
 
 // Helper to generate unique filename for duplicates
