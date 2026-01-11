@@ -126,7 +126,7 @@ export const uploadChunk = async (req: AuthRequest, res: Response): Promise<void
 
         // Verify file belongs to user
         const file = await prisma.file.findFirst({
-            where: { id: uploadId, userId, isChunked: true },
+            where: { id: String(uploadId), userId, isChunked: true },
         });
 
         if (!file) {
@@ -136,7 +136,7 @@ export const uploadChunk = async (req: AuthRequest, res: Response): Promise<void
 
         // Check if chunk already exists
         const existingChunk = await prisma.fileChunk.findUnique({
-            where: { fileId_chunkIndex: { fileId: uploadId, chunkIndex } },
+            where: { fileId_chunkIndex: { fileId: String(uploadId), chunkIndex } },
         });
 
         if (existingChunk) {
@@ -145,7 +145,7 @@ export const uploadChunk = async (req: AuthRequest, res: Response): Promise<void
             res.json({
                 chunkIndex,
                 status: 'already_uploaded',
-                uploadedChunks: await prisma.fileChunk.count({ where: { fileId: uploadId } }),
+                uploadedChunks: await prisma.fileChunk.count({ where: { fileId: String(uploadId) } }),
                 totalChunks: file.totalChunks,
             });
             return;
@@ -176,7 +176,7 @@ export const uploadChunk = async (req: AuthRequest, res: Response): Promise<void
         // Save chunk metadata
         await prisma.fileChunk.create({
             data: {
-                fileId: uploadId,
+                fileId: String(uploadId),
                 chunkIndex,
                 telegramFileId: result.file_id,
                 telegramMsgId: result.message_id,
@@ -186,7 +186,7 @@ export const uploadChunk = async (req: AuthRequest, res: Response): Promise<void
 
         // Note: Python service deletes the temp file with delete_after: true
 
-        const uploadedChunks = await prisma.fileChunk.count({ where: { fileId: uploadId } });
+        const uploadedChunks = await prisma.fileChunk.count({ where: { fileId: String(uploadId) } });
 
         res.json({
             chunkIndex,
@@ -217,7 +217,7 @@ export const completeChunkedUpload = async (req: AuthRequest, res: Response): Pr
 
         // Verify file belongs to user
         const file = await prisma.file.findFirst({
-            where: { id: uploadId, userId, isChunked: true },
+            where: { id: String(uploadId), userId, isChunked: true },
         });
 
         if (!file) {
@@ -226,7 +226,7 @@ export const completeChunkedUpload = async (req: AuthRequest, res: Response): Pr
         }
 
         // Verify all chunks are uploaded
-        const uploadedChunks = await prisma.fileChunk.count({ where: { fileId: uploadId } });
+        const uploadedChunks = await prisma.fileChunk.count({ where: { fileId: String(uploadId) } });
 
         if (uploadedChunks !== file.totalChunks) {
             res.status(400).json({
@@ -270,7 +270,7 @@ export const cancelChunkedUpload = async (req: AuthRequest, res: Response): Prom
 
         // Verify file belongs to user
         const file = await prisma.file.findFirst({
-            where: { id: uploadId, userId, isChunked: true },
+            where: { id: String(uploadId), userId, isChunked: true },
             include: { chunks: true },
         });
 
@@ -280,7 +280,7 @@ export const cancelChunkedUpload = async (req: AuthRequest, res: Response): Prom
         }
 
         // Delete chunks from Telegram via Bot HTTP API (lightweight, rate-limited)
-        if (file.chunks.length > 0) {
+        if ((file as any).chunks.length > 0) {
             try {
                 const config = await prisma.telegramConfig.findUnique({
                     where: { userId },
@@ -288,7 +288,7 @@ export const cancelChunkedUpload = async (req: AuthRequest, res: Response): Prom
 
                 if (config) {
                     const { deleteFileFromTelegram } = await import('../lib/telegramBotApi');
-                    const msgIds = file.chunks.map((c: any) => c.telegramMsgId);
+                    const msgIds = (file as any).chunks.map((c: any) => c.telegramMsgId);
                     await deleteFileFromTelegram(config.botToken, config.channelId, msgIds);
                 }
             } catch (telegramError) {
@@ -297,7 +297,7 @@ export const cancelChunkedUpload = async (req: AuthRequest, res: Response): Prom
         }
 
         // Delete file (cascades to chunks)
-        await prisma.file.delete({ where: { id: uploadId } });
+        await prisma.file.delete({ where: { id: String(uploadId) } });
 
         res.json({ success: true, message: 'Upload cancelled' });
     } catch (error) {
@@ -321,7 +321,7 @@ export const downloadChunkedFile = async (req: AuthRequest, res: Response): Prom
         }
 
         const file = await prisma.file.findFirst({
-            where: { id, userId },
+            where: { id: String(id), userId },
             include: { chunks: { orderBy: { chunkIndex: 'asc' } } },
         });
 
@@ -330,7 +330,7 @@ export const downloadChunkedFile = async (req: AuthRequest, res: Response): Prom
             return;
         }
 
-        if (!file.isChunked || file.chunks.length === 0) {
+        if (!file.isChunked || (file as any).chunks.length === 0) {
             res.status(400).json({ error: 'File is not chunked or has no chunks' });
             return;
         }
@@ -348,12 +348,12 @@ export const downloadChunkedFile = async (req: AuthRequest, res: Response): Prom
         res.setHeader('Content-Type', file.mimeType);
         res.setHeader('Content-Disposition', `attachment; filename="${file.name}"`);
         res.setHeader('Content-Length', file.size.toString());
-        res.setHeader('X-Total-Chunks', file.chunks.length.toString());
+        res.setHeader('X-Total-Chunks', (file as any).chunks.length.toString());
 
         // Use Python service for batch download (parallel + fast)
         const { batchDownloadFromTelegram } = await import('../lib/pythonService');
 
-        const messageIds = file.chunks.map(c => c.telegramMsgId);
+        const messageIds = (file as any).chunks.map((c: any) => c.telegramMsgId);
         const buffer = await batchDownloadFromTelegram(
             {
                 botToken: config.botToken,

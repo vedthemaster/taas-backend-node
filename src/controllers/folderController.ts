@@ -54,7 +54,7 @@ export const getFolder = async (req: AuthRequest, res: Response): Promise<void> 
 
         const folder = await prisma.folder.findFirst({
             where: {
-                id,
+                id: String(id),
                 userId,
             },
             include: {
@@ -87,7 +87,7 @@ export const getFolder = async (req: AuthRequest, res: Response): Promise<void> 
 
         while (current.parent) {
             const parent = await prisma.folder.findUnique({
-                where: { id: current.parent.id },
+                where: { id: (current as any).parent.id },
                 include: { parent: { select: { id: true, name: true, parentId: true } } },
             });
             if (parent) {
@@ -163,7 +163,7 @@ export const updateFolder = async (req: AuthRequest, res: Response): Promise<voi
         }
 
         const folder = await prisma.folder.findFirst({
-            where: { id, userId },
+            where: { id: String(id), userId },
         });
 
         if (!folder) {
@@ -172,7 +172,7 @@ export const updateFolder = async (req: AuthRequest, res: Response): Promise<voi
         }
 
         const updatedFolder = await prisma.folder.update({
-            where: { id },
+            where: { id: String(id) },
             data: { name: name.trim() },
         });
 
@@ -194,7 +194,7 @@ export const deleteFolder = async (req: AuthRequest, res: Response): Promise<voi
         }
 
         const folder = await prisma.folder.findFirst({
-            where: { id, userId },
+            where: { id: String(id), userId },
         });
 
         if (!folder) {
@@ -204,7 +204,7 @@ export const deleteFolder = async (req: AuthRequest, res: Response): Promise<voi
 
         // Cascade delete is handled by Prisma schema
         await prisma.folder.delete({
-            where: { id },
+            where: { id: String(id) },
         });
 
         res.json({ message: 'Folder deleted successfully' });

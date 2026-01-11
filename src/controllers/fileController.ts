@@ -94,7 +94,7 @@ export const getFile = async (req: AuthRequest, res: Response): Promise<void> =>
         }
 
         const file = await prisma.file.findFirst({
-            where: { id, userId },
+            where: { id: String(id), userId },
         });
 
         if (!file) {
@@ -218,7 +218,7 @@ export const downloadFile = async (req: AuthRequest, res: Response): Promise<voi
         }
 
         const file = await prisma.file.findFirst({
-            where: { id, userId },
+            where: { id: String(id), userId },
             include: { chunks: { orderBy: { chunkIndex: 'asc' } } },
         });
 
@@ -229,7 +229,7 @@ export const downloadFile = async (req: AuthRequest, res: Response): Promise<voi
 
         // Handle chunked files
         if (file.isChunked) {
-            if (!file.chunks || file.chunks.length === 0) {
+            if (!(file as any).chunks || (file as any).chunks.length === 0) {
                 res.status(400).json({ error: 'Chunked file has no chunks' });
                 return;
             }
@@ -258,7 +258,7 @@ export const downloadFile = async (req: AuthRequest, res: Response): Promise<voi
             // Use Python service for streaming download (memory-efficient)
             const { batchDownloadFromTelegramStream } = await import('../lib/pythonService');
 
-            const messageIds = file.chunks.map((c: any) => c.telegramMsgId);
+            const messageIds = (file as any).chunks.map((c: any) => c.telegramMsgId);
             const { stream } = await batchDownloadFromTelegramStream(
                 {
                     botToken: config.botToken,
@@ -348,7 +348,7 @@ export const deleteFile = async (req: AuthRequest, res: Response): Promise<void>
         }
 
         const file = await prisma.file.findFirst({
-            where: { id, userId },
+            where: { id: String(id), userId },
             include: { chunks: true },
         });
 
@@ -366,9 +366,9 @@ export const deleteFile = async (req: AuthRequest, res: Response): Promise<void>
             if (config) {
                 const { deleteFileFromTelegram } = await import('../lib/telegramBotApi');
 
-                if (file.isChunked && file.chunks.length > 0) {
+                if (file.isChunked && (file as any).chunks.length > 0) {
                     // Delete all chunks
-                    const msgIds = file.chunks.map((c: any) => c.telegramMsgId);
+                    const msgIds = (file as any).chunks.map((c: any) => c.telegramMsgId);
                     await deleteFileFromTelegram(config.botToken, config.channelId, msgIds);
                 } else if (file.telegramMsgId) {
                     // Delete single file
@@ -382,7 +382,7 @@ export const deleteFile = async (req: AuthRequest, res: Response): Promise<void>
 
         // Delete from database
         await prisma.file.delete({
-            where: { id },
+            where: { id: String(id) },
         });
 
         res.json({ message: 'File deleted successfully' });
