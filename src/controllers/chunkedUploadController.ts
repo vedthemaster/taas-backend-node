@@ -1,8 +1,7 @@
 import { Response } from 'express';
 import prisma from '../lib/prisma';
 import { AuthRequest } from '../middleware/authMiddleware';
-import { getTelegramClient } from './telegramController';
-import { Api } from 'telegram';
+import { uploadToTelegram } from '../lib/pythonService';
 import fs from 'fs';
 import path from 'path';
 
@@ -152,13 +151,7 @@ export const uploadChunk = async (req: AuthRequest, res: Response): Promise<void
             return;
         }
 
-        // Get Telegram client
-        const client = await getTelegramClient(userId);
-        if (!client) {
-            res.status(400).json({ error: 'Telegram not configured' });
-            return;
-        }
-
+        // Get Telegram config for credentials
         const config = await prisma.telegramConfig.findUnique({
             where: { userId },
         });
@@ -168,31 +161,30 @@ export const uploadChunk = async (req: AuthRequest, res: Response): Promise<void
             return;
         }
 
-        // Upload chunk to Telegram
-        const result = await client.sendFile(config.channelId, {
-            file: chunk.path,
-            caption: `📁 ${file.name} - Chunk ${chunkIndex + 1}/${file.totalChunks}`,
-            forceDocument: true,
-        });
-
-        const message = result as Api.Message;
-        const telegramFileId = message.document
-            ? (message.document as any).id.toString()
-            : message.id.toString();
+        // Upload chunk to Telegram via Python service
+        const result = await uploadToTelegram(
+            {
+                botToken: config.botToken,
+                channelId: config.channelId,
+                apiId: config.apiId,
+                apiHash: config.apiHash,
+            },
+            chunk.path,
+            `📁 ${file.name} - Chunk ${chunkIndex + 1}/${file.totalChunks}`
+        );
 
         // Save chunk metadata
         await prisma.fileChunk.create({
             data: {
                 fileId: uploadId,
                 chunkIndex,
-                telegramFileId,
-                telegramMsgId: message.id,
+                telegramFileId: result.file_id,
+                telegramMsgId: result.message_id,
                 size: BigInt(chunk.size),
             },
         });
 
-        // Clean up temp file
-        fs.unlinkSync(chunk.path);
+        // Note: Python service deletes the temp file with delete_after: true
 
         const uploadedChunks = await prisma.fileChunk.count({ where: { fileId: uploadId } });
 
@@ -287,19 +279,21 @@ export const cancelChunkedUpload = async (req: AuthRequest, res: Response): Prom
             return;
         }
 
-        // Try to delete chunks from Telegram
-        try {
-            const client = await getTelegramClient(userId);
-            const config = await prisma.telegramConfig.findUnique({
-                where: { userId },
-            });
+        // Delete chunks from Telegram via Bot HTTP API (lightweight, rate-limited)
+        if (file.chunks.length > 0) {
+            try {
+                const config = await prisma.telegramConfig.findUnique({
+                    where: { userId },
+                });
 
-            if (client && config && file.chunks.length > 0) {
-                const msgIds = file.chunks.map(c => c.telegramMsgId);
-                await client.deleteMessages(config.channelId, msgIds, { revoke: true });
+                if (config) {
+                    const { deleteFileFromTelegram } = await import('../lib/telegramBotApi');
+                    const msgIds = file.chunks.map((c: any) => c.telegramMsgId);
+                    await deleteFileFromTelegram(config.botToken, config.channelId, msgIds);
+                }
+            } catch (telegramError) {
+                console.warn('Failed to delete chunks from Telegram:', telegramError);
             }
-        } catch (telegramError) {
-            console.warn('Failed to delete chunks from Telegram:', telegramError);
         }
 
         // Delete file (cascades to chunks)
@@ -313,7 +307,7 @@ export const cancelChunkedUpload = async (req: AuthRequest, res: Response): Prom
 };
 
 /**
- * Download a chunked file (streaming)
+ * Download a chunked file (streaming via Python service)
  * GET /api/files/:id/download/stream
  */
 export const downloadChunkedFile = async (req: AuthRequest, res: Response): Promise<void> => {
@@ -341,13 +335,6 @@ export const downloadChunkedFile = async (req: AuthRequest, res: Response): Prom
             return;
         }
 
-        // Get Telegram client
-        const client = await getTelegramClient(userId);
-        if (!client) {
-            res.status(400).json({ error: 'Telegram not configured' });
-            return;
-        }
-
         const config = await prisma.telegramConfig.findUnique({
             where: { userId },
         });
@@ -363,31 +350,21 @@ export const downloadChunkedFile = async (req: AuthRequest, res: Response): Prom
         res.setHeader('Content-Length', file.size.toString());
         res.setHeader('X-Total-Chunks', file.chunks.length.toString());
 
-        // Stream each chunk
-        for (let i = 0; i < file.chunks.length; i++) {
-            const chunk = file.chunks[i];
+        // Use Python service for batch download (parallel + fast)
+        const { batchDownloadFromTelegram } = await import('../lib/pythonService');
 
-            // Get message from Telegram
-            const messages = await client.getMessages(config.channelId, {
-                ids: [chunk.telegramMsgId],
-            });
+        const messageIds = file.chunks.map(c => c.telegramMsgId);
+        const buffer = await batchDownloadFromTelegram(
+            {
+                botToken: config.botToken,
+                channelId: config.channelId,
+                apiId: config.apiId,
+                apiHash: config.apiHash,
+            },
+            messageIds
+        );
 
-            if (!messages || messages.length === 0) {
-                throw new Error(`Chunk ${i} not found on Telegram`);
-            }
-
-            const message = messages[0];
-            const buffer = await client.downloadMedia(message, {});
-
-            if (!buffer) {
-                throw new Error(`Failed to download chunk ${i}`);
-            }
-
-            // Write chunk to response
-            res.write(buffer);
-        }
-
-        res.end();
+        res.send(buffer);
     } catch (error) {
         console.error('Download chunked file error:', error);
         if (!res.headersSent) {

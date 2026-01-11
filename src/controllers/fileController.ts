@@ -255,93 +255,22 @@ export const downloadFile = async (req: AuthRequest, res: Response): Promise<voi
             res.setHeader('Content-Disposition', `attachment; filename="${file.name}"`);
             res.setHeader('Content-Length', file.size.toString());
 
-            // Download chunks in parallel (3 concurrent) and store in order
-            const MAX_CONCURRENT_DOWNLOADS = 3;
-            const chunkBuffers: Map<number, Buffer> = new Map();
-            const chunks = [...file.chunks];
-            let nextChunkToWrite = 0;
-            let downloadQueue = chunks.map(c => c.chunkIndex);
-            let activeDownloads = 0;
+            // Use Python service for streaming download (memory-efficient)
+            const { batchDownloadFromTelegramStream } = await import('../lib/pythonService');
 
-            const downloadChunk = async (chunkIndex: number): Promise<void> => {
-                const chunk = chunks.find(c => c.chunkIndex === chunkIndex);
-                if (!chunk) return;
+            const messageIds = file.chunks.map((c: any) => c.telegramMsgId);
+            const { stream } = await batchDownloadFromTelegramStream(
+                {
+                    botToken: config.botToken,
+                    channelId: config.channelId,
+                    apiId: config.apiId,
+                    apiHash: config.apiHash,
+                },
+                messageIds
+            );
 
-                const messages = await client.getMessages(config.channelId, {
-                    ids: [chunk.telegramMsgId],
-                });
-
-                if (!messages || messages.length === 0 || !messages[0]) {
-                    throw new Error(`Chunk ${chunkIndex} not found on Telegram`);
-                }
-
-                const buffer = await client.downloadMedia(messages[0], {});
-                if (!buffer) {
-                    throw new Error(`Failed to download chunk ${chunkIndex}`);
-                }
-
-                chunkBuffers.set(chunkIndex, buffer as Buffer);
-            };
-
-            // Process and write chunks in order
-            const writeAvailableChunks = () => {
-                while (chunkBuffers.has(nextChunkToWrite)) {
-                    const buffer = chunkBuffers.get(nextChunkToWrite)!;
-                    res.write(buffer);
-                    chunkBuffers.delete(nextChunkToWrite);
-                    nextChunkToWrite++;
-                }
-            };
-
-            // Download all chunks with concurrency limit
-            const downloadAll = async () => {
-                const downloadPromises: Promise<void>[] = [];
-
-                const startNextDownload = async (): Promise<void> => {
-                    while (downloadQueue.length > 0 && activeDownloads < MAX_CONCURRENT_DOWNLOADS) {
-                        const chunkIndex = downloadQueue.shift()!;
-                        activeDownloads++;
-
-                        const downloadPromise = downloadChunk(chunkIndex)
-                            .then(() => {
-                                activeDownloads--;
-                                writeAvailableChunks();
-                            })
-                            .catch(err => {
-                                throw err;
-                            });
-
-                        downloadPromises.push(downloadPromise);
-                    }
-                };
-
-                await startNextDownload();
-
-                // Wait for initial batch
-                while (downloadPromises.length > 0 || downloadQueue.length > 0) {
-                    if (downloadPromises.length > 0) {
-                        await Promise.race(downloadPromises);
-                        // Remove completed promises
-                        const newPromises: Promise<void>[] = [];
-                        for (const p of downloadPromises) {
-                            const result = await Promise.race([p, Promise.resolve('pending')]);
-                            if (result === 'pending') {
-                                newPromises.push(p);
-                            }
-                        }
-                        downloadPromises.length = 0;
-                        downloadPromises.push(...newPromises);
-                    }
-                    await startNextDownload();
-                }
-
-                // Wait for all remaining downloads
-                await Promise.all(downloadPromises);
-                writeAvailableChunks();
-            };
-
-            await downloadAll();
-            res.end();
+            // Pipe stream directly to client (memory-efficient)
+            stream.pipe(res);
             return;
         }
 
@@ -420,6 +349,7 @@ export const deleteFile = async (req: AuthRequest, res: Response): Promise<void>
 
         const file = await prisma.file.findFirst({
             where: { id, userId },
+            include: { chunks: true },
         });
 
         if (!file) {
@@ -427,17 +357,23 @@ export const deleteFile = async (req: AuthRequest, res: Response): Promise<void>
             return;
         }
 
-        // Try to delete from Telegram (optional - might fail if message already deleted)
+        // Try to delete from Telegram via Bot HTTP API (lightweight, no MTProto needed)
         try {
-            const client = await getTelegramClient(userId);
             const config = await prisma.telegramConfig.findUnique({
                 where: { userId },
             });
 
-            if (client && config) {
-                await client.deleteMessages(config.channelId, [file.telegramMsgId], {
-                    revoke: true,
-                });
+            if (config) {
+                const { deleteFileFromTelegram } = await import('../lib/telegramBotApi');
+
+                if (file.isChunked && file.chunks.length > 0) {
+                    // Delete all chunks
+                    const msgIds = file.chunks.map((c: any) => c.telegramMsgId);
+                    await deleteFileFromTelegram(config.botToken, config.channelId, msgIds);
+                } else if (file.telegramMsgId) {
+                    // Delete single file
+                    await deleteFileFromTelegram(config.botToken, config.channelId, file.telegramMsgId);
+                }
             }
         } catch (telegramError) {
             console.warn('Failed to delete from Telegram:', telegramError);
