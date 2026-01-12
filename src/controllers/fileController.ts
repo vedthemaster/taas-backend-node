@@ -1,8 +1,6 @@
 import { Response } from 'express';
 import prisma from '../lib/prisma';
 import { AuthRequest } from '../middleware/authMiddleware';
-import { getTelegramClient } from './telegramController';
-import { Api } from 'telegram';
 import fs from 'fs';
 import path from 'path';
 
@@ -130,35 +128,29 @@ export const uploadFile = async (req: AuthRequest, res: Response): Promise<void>
             return;
         }
 
-        // Get Telegram client
-        const client = await getTelegramClient(userId);
-        if (!client) {
-            res.status(400).json({ error: 'Telegram not configured. Please set up Telegram first.' });
-            return;
-        }
-
-        // Get user's channel ID
+        // Get Telegram config with bots
         const config = await prisma.telegramConfig.findUnique({
             where: { userId },
+            include: { bots: { where: { isActive: true } } },
         });
 
-        if (!config) {
-            res.status(400).json({ error: 'Telegram configuration not found' });
+        if (!config || (config as any).bots.length === 0) {
+            res.status(400).json({ error: 'No bots configured. Please add at least one bot in settings.' });
             return;
         }
 
-        // Upload file to Telegram
-        const result = await client.sendFile(config.channelId, {
-            file: file.path,
-            caption: `📁 ${file.originalname}`,
-            forceDocument: true,
-        });
+        const botTokens = (config as any).bots.map((b: any) => b.botToken);
 
-        // Get the file ID from the message
-        const message = result as Api.Message;
-        const telegramFileId = message.document
-            ? (message.document as any).id.toString()
-            : message.id.toString();
+        // Upload file to Telegram via Python service
+        const { uploadToTelegram } = await import('../lib/pythonService');
+        const result = await uploadToTelegram(
+            {
+                channelId: config.channelId,
+                botTokens,
+            },
+            file.path,
+            `📁 ${file.originalname}`
+        );
 
         // Verify folder belongs to user if provided
         if (folderId) {
@@ -184,15 +176,12 @@ export const uploadFile = async (req: AuthRequest, res: Response): Promise<void>
                 name: uniqueFilename,
                 size: BigInt(file.size),
                 mimeType: file.mimetype,
-                telegramFileId,
-                telegramMsgId: message.id,
+                telegramFileId: result.file_id,
+                telegramMsgId: result.message_id,
                 folderId: folderId || null,
                 userId,
             },
         });
-
-        // Clean up temp file
-        fs.unlinkSync(file.path);
 
         res.status(201).json({
             file: {
@@ -227,26 +216,23 @@ export const downloadFile = async (req: AuthRequest, res: Response): Promise<voi
             return;
         }
 
+        // Get Telegram config with bots
+        const config = await prisma.telegramConfig.findUnique({
+            where: { userId },
+            include: { bots: { where: { isActive: true } } },
+        });
+
+        if (!config || (config as any).bots.length === 0) {
+            res.status(400).json({ error: 'No bots configured' });
+            return;
+        }
+
+        const botTokens = (config as any).bots.map((b: any) => b.botToken);
+
         // Handle chunked files
         if (file.isChunked) {
             if (!(file as any).chunks || (file as any).chunks.length === 0) {
                 res.status(400).json({ error: 'Chunked file has no chunks' });
-                return;
-            }
-
-            // Get Telegram client
-            const client = await getTelegramClient(userId);
-            if (!client) {
-                res.status(400).json({ error: 'Telegram not configured' });
-                return;
-            }
-
-            const config = await prisma.telegramConfig.findUnique({
-                where: { userId },
-            });
-
-            if (!config) {
-                res.status(400).json({ error: 'Telegram configuration not found' });
                 return;
             }
 
@@ -255,18 +241,18 @@ export const downloadFile = async (req: AuthRequest, res: Response): Promise<voi
             res.setHeader('Content-Disposition', `attachment; filename="${file.name}"`);
             res.setHeader('Content-Length', file.size.toString());
 
-            // Use Python service for streaming download (memory-efficient)
-            const { batchDownloadFromTelegramStream } = await import('../lib/pythonService');
+            // Use Python service for streaming download by file_ids (memory-efficient)
+            const { downloadByFileIdsStream } = await import('../lib/pythonService');
 
-            const messageIds = (file as any).chunks.map((c: any) => c.telegramMsgId);
-            const { stream } = await batchDownloadFromTelegramStream(
+            // Use file_id for downloads (stored during upload)
+            const fileIds = (file as any).chunks.map((c: any) => c.telegramFileId);
+
+            const { stream } = await downloadByFileIdsStream(
                 {
-                    botToken: config.botToken,
                     channelId: config.channelId,
-                    apiId: config.apiId,
-                    apiHash: config.apiHash,
+                    botTokens,
                 },
-                messageIds
+                fileIds
             );
 
             // Pipe stream directly to client (memory-efficient)
@@ -274,63 +260,29 @@ export const downloadFile = async (req: AuthRequest, res: Response): Promise<voi
             return;
         }
 
-        // Standard file download (non-chunked)
-        if (!file.telegramMsgId) {
-            res.status(400).json({ error: 'File has no Telegram message ID' });
+        // Standard file download (non-chunked) - use Python service with single file_id
+        if (!file.telegramFileId) {
+            res.status(400).json({ error: 'File has no Telegram file ID' });
             return;
         }
 
-        // Get Telegram client
-        const client = await getTelegramClient(userId);
-        if (!client) {
-            res.status(400).json({ error: 'Telegram not configured' });
-            return;
-        }
-
-        // Get user's channel ID
-        const config = await prisma.telegramConfig.findUnique({
-            where: { userId },
-        });
-
-        if (!config) {
-            res.status(400).json({ error: 'Telegram configuration not found' });
-            return;
-        }
-
-        // Get messages from channel to find the file
-        const messages = await client.getMessages(config.channelId, {
-            ids: [file.telegramMsgId],
-        });
-
-        if (!messages || messages.length === 0) {
-            res.status(404).json({ error: 'File not found on Telegram' });
-            return;
-        }
-
-        const message = messages[0];
-        if (!message.document && !message.media) {
-            res.status(404).json({ error: 'No file attached to message' });
-            return;
-        }
-
-        // Download the file
-        const tempDir = path.join(process.cwd(), 'temp');
-        if (!fs.existsSync(tempDir)) {
-            fs.mkdirSync(tempDir, { recursive: true });
-        }
-
-        const tempPath = path.join(tempDir, `${Date.now()}_${file.name}`);
-        const buffer = await client.downloadMedia(message, {});
-
-        if (!buffer) {
-            res.status(500).json({ error: 'Failed to download file from Telegram' });
-            return;
-        }
-
-        // Set response headers and send file
+        // Set response headers
         res.setHeader('Content-Type', file.mimeType);
         res.setHeader('Content-Disposition', `attachment; filename="${file.name}"`);
-        res.send(buffer);
+        res.setHeader('Content-Length', file.size.toString());
+
+        // Use Python service for single file download
+        const { downloadByFileIdsStream } = await import('../lib/pythonService');
+
+        const { stream } = await downloadByFileIdsStream(
+            {
+                channelId: config.channelId,
+                botTokens,
+            },
+            [file.telegramFileId] // Single file as array
+        );
+
+        stream.pipe(res);
     } catch (error) {
         console.error('Download file error:', error);
         res.status(500).json({ error: 'Failed to download file' });

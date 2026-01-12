@@ -19,15 +19,26 @@ model User {
 }
 
 model TelegramConfig {
-  id        String   @id @default(uuid())
-  userId    String   @unique
-  botToken  String
-  channelId String
-  apiId     String
-  apiHash   String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id        String         @id @default(uuid())
+  userId    String         @unique
+  channelId String         // Shared channel for all bots
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bots      TelegramBot[]
+}
+
+model TelegramBot {
+  id            String          @id @default(uuid())
+  configId      String
+  botToken      String
+  botUsername   String?         // Fetched from Telegram getMe
+  lastMessageAt DateTime?       // For rate limiting (20 msg/min = 1 per 3 sec)
+  isActive      Boolean         @default(true)
+  createdAt     DateTime        @default(now())
+  config        TelegramConfig  @relation(fields: [configId], references: [id], onDelete: Cascade)
+
+  @@index([configId])
 }
 
 model Folder {

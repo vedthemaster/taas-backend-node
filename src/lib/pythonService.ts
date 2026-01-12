@@ -1,6 +1,7 @@
 /**
- * Python Telegram Service Client
- * Communicates with the FastAPI/Telethon service for file operations
+ * Python Telegram Service Client (aiogram)
+ * Communicates with the FastAPI/aiogram service for file operations
+ * Multi-bot support with rate limiting
  */
 
 import axios from 'axios';
@@ -8,37 +9,31 @@ import axios from 'axios';
 const PYTHON_SERVICE_URL = process.env.PYTHON_SERVICE_URL || 'http://localhost:5001';
 
 interface UploadResult {
-    success: boolean;
     message_id: number;
     file_id: string;
 }
 
-interface TelegramCredentials {
-    botToken: string;
+interface MultiBot {
     channelId: string;
-    apiId: string;
-    apiHash: string;
+    botTokens: string[];
 }
 
 /**
  * Upload a file to Telegram via Python service (using local file path - zero copy)
- * This is much faster than streaming bytes over HTTP when both services are on the same machine
  */
 export const uploadToTelegram = async (
-    credentials: TelegramCredentials,
+    config: MultiBot,
     filePath: string,
     caption: string
 ): Promise<UploadResult> => {
     const response = await axios.post<UploadResult>(
         `${PYTHON_SERVICE_URL}/upload/path`,
         {
-            bot_token: credentials.botToken,
-            channel_id: credentials.channelId,
-            api_id: credentials.apiId,
-            api_hash: credentials.apiHash,
+            channel_id: config.channelId,
+            bot_tokens: config.botTokens,
             file_path: filePath,
             caption: caption,
-            delete_after: true,  // Python service will delete the temp file after upload
+            delete_after: true,
         }
     );
 
@@ -46,45 +41,18 @@ export const uploadToTelegram = async (
 };
 
 /**
- * Download a single file from Telegram via Python service
- */
-export const downloadFromTelegram = async (
-    credentials: TelegramCredentials,
-    messageId: number
-): Promise<Buffer> => {
-    const response = await axios.post(
-        `${PYTHON_SERVICE_URL}/download`,
-        {
-            bot_token: credentials.botToken,
-            channel_id: credentials.channelId,
-            api_id: credentials.apiId,
-            api_hash: credentials.apiHash,
-            message_id: messageId,
-        },
-        {
-            responseType: 'arraybuffer',
-        }
-    );
-
-    return Buffer.from(response.data);
-};
-
-/**
- * Download multiple files (chunks) from Telegram via Python service
+ * Download files by file_ids from Telegram via Python service
  * Returns a stream for piping directly to client (memory-efficient)
  */
-export const batchDownloadFromTelegramStream = async (
-    credentials: TelegramCredentials,
-    messageIds: number[]
-): Promise<{ stream: NodeJS.ReadableStream; chunkCount: number }> => {
+export const downloadByFileIdsStream = async (
+    config: MultiBot,
+    fileIds: string[]
+): Promise<{ stream: NodeJS.ReadableStream; fileCount: number }> => {
     const response = await axios.post(
-        `${PYTHON_SERVICE_URL}/download/batch`,
+        `${PYTHON_SERVICE_URL}/download/by-file-ids`,
         {
-            bot_token: credentials.botToken,
-            channel_id: credentials.channelId,
-            api_id: credentials.apiId,
-            api_hash: credentials.apiHash,
-            message_ids: messageIds,
+            bot_tokens: config.botTokens,
+            file_ids: fileIds,
         },
         {
             responseType: 'stream',
@@ -93,25 +61,22 @@ export const batchDownloadFromTelegramStream = async (
 
     return {
         stream: response.data,
-        chunkCount: parseInt(response.headers['x-chunk-count'] || '0'),
+        fileCount: parseInt(response.headers['x-file-count'] || '0'),
     };
 };
 
 /**
- * Legacy: Download all chunks to buffer (high memory usage, use stream version for large files)
+ * Download files by file_ids to buffer (for smaller files)
  */
-export const batchDownloadFromTelegram = async (
-    credentials: TelegramCredentials,
-    messageIds: number[]
+export const downloadByFileIds = async (
+    config: MultiBot,
+    fileIds: string[]
 ): Promise<Buffer> => {
     const response = await axios.post(
-        `${PYTHON_SERVICE_URL}/download/batch`,
+        `${PYTHON_SERVICE_URL}/download/by-file-ids`,
         {
-            bot_token: credentials.botToken,
-            channel_id: credentials.channelId,
-            api_id: credentials.apiId,
-            api_hash: credentials.apiHash,
-            message_ids: messageIds,
+            bot_tokens: config.botTokens,
+            file_ids: fileIds,
         },
         {
             responseType: 'arraybuffer',
@@ -119,6 +84,18 @@ export const batchDownloadFromTelegram = async (
     );
 
     return Buffer.from(response.data);
+};
+
+/**
+ * Verify a bot token
+ */
+export const verifyBotToken = async (
+    botToken: string
+): Promise<{ valid: boolean; username?: string; error?: string }> => {
+    const response = await axios.post(`${PYTHON_SERVICE_URL}/verify-bot`, {
+        bot_token: botToken,
+    });
+    return response.data;
 };
 
 /**
@@ -131,30 +108,4 @@ export const checkPythonServiceHealth = async (): Promise<boolean> => {
     } catch {
         return false;
     }
-};
-
-interface DeleteResult {
-    success: boolean;
-    deleted_count: number;
-}
-
-/**
- * Delete messages from Telegram via Python service
- */
-export const deleteFromTelegram = async (
-    credentials: TelegramCredentials,
-    messageIds: number[]
-): Promise<DeleteResult> => {
-    const response = await axios.post<DeleteResult>(
-        `${PYTHON_SERVICE_URL}/delete`,
-        {
-            bot_token: credentials.botToken,
-            channel_id: credentials.channelId,
-            api_id: credentials.apiId,
-            api_hash: credentials.apiHash,
-            message_ids: messageIds,
-        }
-    );
-
-    return response.data;
 };
