@@ -45,8 +45,12 @@ COPY --from=builder /app/dist ./dist/
 # Create temp directory for file uploads
 RUN mkdir -p temp
 
+# Copy entrypoint script
+COPY docker-entrypoint.sh ./
+RUN chmod +x docker-entrypoint.sh
+
 # Expose port
 EXPOSE 5000
 
-# Start the application
-CMD ["node", "dist/index.js"]
+# Start the application with migrations
+ENTRYPOINT ["./docker-entrypoint.sh"]
