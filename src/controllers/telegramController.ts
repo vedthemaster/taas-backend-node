@@ -109,6 +109,11 @@ export const validateTelegram = async (req: AuthRequest, res: Response): Promise
             return;
         }
 
+        if (!config.botToken || !config.apiId || !config.apiHash) {
+            res.status(400).json({ error: 'Telegram credentials incomplete. Please reconfigure.' });
+            return;
+        }
+
         // Create a Telegram client to validate credentials
         const stringSession = new StringSession('');
         const client = new TelegramClient(
@@ -154,6 +159,10 @@ export const getTelegramClient = async (userId: string): Promise<TelegramClient 
     });
 
     if (!config) {
+        return null;
+    }
+
+    if (!config.botToken || !config.apiId || !config.apiHash) {
         return null;
     }
 

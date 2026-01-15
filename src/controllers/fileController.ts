@@ -341,18 +341,23 @@ export const deleteFile = async (req: AuthRequest, res: Response): Promise<void>
         try {
             const config = await prisma.telegramConfig.findUnique({
                 where: { userId },
+                include: { bots: { where: { isActive: true } } },
             });
 
             if (config) {
                 const { deleteFileFromTelegram } = await import('../lib/telegramBotApi');
+                // Get botToken from config or fall back to first active bot
+                const botToken = config.botToken || (config.bots.length > 0 ? config.bots[0].botToken : null);
 
-                if (file.isChunked && (file as any).chunks.length > 0) {
-                    // Delete all chunks
-                    const msgIds = (file as any).chunks.map((c: any) => c.telegramMsgId);
-                    await deleteFileFromTelegram(config.botToken, config.channelId, msgIds);
-                } else if (file.telegramMsgId) {
-                    // Delete single file
-                    await deleteFileFromTelegram(config.botToken, config.channelId, file.telegramMsgId);
+                if (botToken) {
+                    if (file.isChunked && (file as any).chunks.length > 0) {
+                        // Delete all chunks
+                        const msgIds = (file as any).chunks.map((c: any) => c.telegramMsgId);
+                        await deleteFileFromTelegram(botToken, config.channelId, msgIds);
+                    } else if (file.telegramMsgId) {
+                        // Delete single file
+                        await deleteFileFromTelegram(botToken, config.channelId, file.telegramMsgId);
+                    }
                 }
             }
         } catch (telegramError) {

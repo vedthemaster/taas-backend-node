@@ -156,7 +156,7 @@ export const removeBot = async (req: AuthRequest, res: Response): Promise<void> 
         }
 
         await prisma.telegramBot.delete({
-            where: { id: botId },
+            where: { id: String(botId) },
         });
 
         res.json({ message: 'Bot removed successfully' });
