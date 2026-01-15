@@ -258,3 +258,77 @@ export const getFolderTree = async (req: AuthRequest, res: Response): Promise<vo
         res.status(500).json({ error: 'Failed to get folder tree' });
     }
 };
+
+// Move folder to different parent
+export const moveFolder = async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        const userId = req.userId;
+        const { id } = req.params;
+        const { targetParentId } = req.body; // null for root
+
+        if (!userId) {
+            res.status(401).json({ error: 'Not authenticated' });
+            return;
+        }
+
+        // Verify folder exists and belongs to user
+        const folder = await prisma.folder.findFirst({
+            where: { id: String(id), userId },
+        });
+
+        if (!folder) {
+            res.status(404).json({ error: 'Folder not found' });
+            return;
+        }
+
+        // Prevent moving folder to itself
+        if (targetParentId === id) {
+            res.status(400).json({ error: 'Cannot move folder into itself' });
+            return;
+        }
+
+        // If target parent specified, verify it exists and belongs to user
+        if (targetParentId) {
+            const targetFolder = await prisma.folder.findFirst({
+                where: { id: String(targetParentId), userId },
+            });
+
+            if (!targetFolder) {
+                res.status(404).json({ error: 'Target folder not found' });
+                return;
+            }
+
+            // Prevent moving folder into its own descendants
+            const isDescendant = async (folderId: string, ancestorId: string): Promise<boolean> => {
+                let current = await prisma.folder.findUnique({
+                    where: { id: folderId },
+                    select: { parentId: true },
+                });
+                while (current?.parentId) {
+                    if (current.parentId === ancestorId) return true;
+                    current = await prisma.folder.findUnique({
+                        where: { id: current.parentId },
+                        select: { parentId: true },
+                    });
+                }
+                return false;
+            };
+
+            if (await isDescendant(String(targetParentId), String(id))) {
+                res.status(400).json({ error: 'Cannot move folder into its own subfolder' });
+                return;
+            }
+        }
+
+        // Update folder's parent
+        const updatedFolder = await prisma.folder.update({
+            where: { id: String(id) },
+            data: { parentId: targetParentId ? String(targetParentId) : null },
+        });
+
+        res.json({ folder: updatedFolder });
+    } catch (error) {
+        console.error('Move folder error:', error);
+        res.status(500).json({ error: 'Failed to move folder' });
+    }
+};

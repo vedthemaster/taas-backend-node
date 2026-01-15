@@ -53,19 +53,47 @@ const getUniqueFilename = async (
 export const getFiles = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const userId = req.userId;
-        const { folderId } = req.query;
+        const { folderId, search, sortBy, sortOrder } = req.query;
 
         if (!userId) {
             res.status(401).json({ error: 'Not authenticated' });
             return;
         }
 
+        // Build where clause
+        const where: any = {
+            userId,
+            folderId: folderId ? String(folderId) : null,
+        };
+
+        // Add search filter
+        if (search && typeof search === 'string' && search.trim()) {
+            where.name = {
+                contains: search.trim(),
+                mode: 'insensitive',
+            };
+        }
+
+        // Build orderBy clause
+        let orderBy: any = { name: 'asc' };
+        if (sortBy) {
+            const order = sortOrder === 'desc' ? 'desc' : 'asc';
+            switch (sortBy) {
+                case 'name':
+                    orderBy = { name: order };
+                    break;
+                case 'date':
+                    orderBy = { createdAt: order };
+                    break;
+                case 'size':
+                    orderBy = { size: order };
+                    break;
+            }
+        }
+
         const files = await prisma.file.findMany({
-            where: {
-                userId,
-                folderId: folderId ? String(folderId) : null,
-            },
-            orderBy: { name: 'asc' },
+            where,
+            orderBy,
         });
 
         // Convert BigInt to string for JSON serialization
@@ -341,5 +369,55 @@ export const deleteFile = async (req: AuthRequest, res: Response): Promise<void>
     } catch (error) {
         console.error('Delete file error:', error);
         res.status(500).json({ error: 'Failed to delete file' });
+    }
+};
+
+// Move file to different folder
+export const moveFile = async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        const userId = req.userId;
+        const { id } = req.params;
+        const { targetFolderId } = req.body; // null for root folder
+
+        if (!userId) {
+            res.status(401).json({ error: 'Not authenticated' });
+            return;
+        }
+
+        // Verify file exists and belongs to user
+        const file = await prisma.file.findFirst({
+            where: { id: String(id), userId },
+        });
+
+        if (!file) {
+            res.status(404).json({ error: 'File not found' });
+            return;
+        }
+
+        // If target folder specified, verify it exists and belongs to user
+        if (targetFolderId) {
+            const targetFolder = await prisma.folder.findFirst({
+                where: { id: String(targetFolderId), userId },
+            });
+
+            if (!targetFolder) {
+                res.status(404).json({ error: 'Target folder not found' });
+                return;
+            }
+        }
+
+        // Update file's folder
+        const updatedFile = await prisma.file.update({
+            where: { id: String(id) },
+            data: { folderId: targetFolderId ? String(targetFolderId) : null },
+        });
+
+        res.json({
+            ...updatedFile,
+            size: updatedFile.size.toString(),
+        });
+    } catch (error) {
+        console.error('Move file error:', error);
+        res.status(500).json({ error: 'Failed to move file' });
     }
 };

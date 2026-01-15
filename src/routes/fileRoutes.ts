@@ -7,7 +7,8 @@ import {
     getFile,
     uploadFile,
     downloadFile,
-    deleteFile
+    deleteFile,
+    moveFile
 } from '../controllers/fileController';
 import {
     initChunkedUpload,
@@ -56,6 +57,7 @@ router.get('/', authMiddleware, getFiles);
 router.get('/:id', authMiddleware, getFile);
 router.post('/upload', authMiddleware, upload.single('file'), uploadFile);
 router.get('/:id/download', authMiddleware, downloadFile);
+router.patch('/:id/move', authMiddleware, moveFile);
 router.delete('/:id', authMiddleware, deleteFile);
 
 // Chunked upload routes
