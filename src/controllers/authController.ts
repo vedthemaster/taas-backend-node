@@ -52,7 +52,12 @@ export const register = async (req: Request, res: Response): Promise<void> => {
 
         res.status(201).json({
             message: 'User created successfully',
-            user,
+            user: {
+                ...user,
+                hasTelegramConfig: false,
+                useSystemBots: false,
+                maxUploadSize: 2 * 1024 * 1024 * 1024, // 2GB default for new users
+            },
             token,
         });
     } catch (error) {
@@ -94,6 +99,9 @@ export const login = async (req: Request, res: Response): Promise<void> => {
         // Generate token
         const token = generateToken(user.id);
 
+        const useSystemBots = user.telegramConfig?.useSystemBots ?? false;
+        const maxUploadSize = useSystemBots ? 100 * 1024 * 1024 : 2 * 1024 * 1024 * 1024; // 100MB or 2GB
+
         res.json({
             message: 'Login successful',
             user: {
@@ -101,6 +109,8 @@ export const login = async (req: Request, res: Response): Promise<void> => {
                 email: user.email,
                 createdAt: user.createdAt,
                 hasTelegramConfig: !!user.telegramConfig,
+                useSystemBots,
+                maxUploadSize,
             },
             token,
         });
@@ -129,6 +139,7 @@ export const getMe = async (req: AuthRequest, res: Response): Promise<void> => {
                     select: {
                         id: true,
                         channelId: true,
+                        useSystemBots: true,
                         createdAt: true,
                     },
                 },
@@ -140,10 +151,15 @@ export const getMe = async (req: AuthRequest, res: Response): Promise<void> => {
             return;
         }
 
+        const useSystemBots = user.telegramConfig?.useSystemBots ?? false;
+        const maxUploadSize = useSystemBots ? 100 * 1024 * 1024 : 2 * 1024 * 1024 * 1024; // 100MB or 2GB
+
         res.json({
             user: {
                 ...user,
                 hasTelegramConfig: !!user.telegramConfig,
+                useSystemBots,
+                maxUploadSize,
             },
         });
     } catch (error) {

@@ -162,12 +162,27 @@ export const uploadFile = async (req: AuthRequest, res: Response): Promise<void>
             include: { bots: { where: { isActive: true } } },
         });
 
-        if (!config || (config as any).bots.length === 0) {
-            res.status(400).json({ error: 'No bots configured. Please add at least one bot in settings.' });
+        if (!config) {
+            res.status(400).json({ error: 'No Telegram configuration found. Please complete setup.' });
             return;
         }
 
-        const botTokens = (config as any).bots.map((b: any) => b.botToken);
+        // Get bot tokens - use system bots if user has useSystemBots=true
+        let botTokens: string[];
+        if (config.useSystemBots) {
+            const { getSystemBotTokens } = await import('./botController');
+            botTokens = getSystemBotTokens();
+            if (botTokens.length === 0) {
+                res.status(500).json({ error: 'System bots not configured. Please contact administrator.' });
+                return;
+            }
+        } else {
+            if ((config as any).bots.length === 0) {
+                res.status(400).json({ error: 'No bots configured. Please add at least one bot in settings.' });
+                return;
+            }
+            botTokens = (config as any).bots.map((b: any) => b.botToken);
+        }
 
         // Upload file to Telegram via Python service
         const { uploadToTelegram } = await import('../lib/pythonService');
@@ -250,12 +265,27 @@ export const downloadFile = async (req: AuthRequest, res: Response): Promise<voi
             include: { bots: { where: { isActive: true } } },
         });
 
-        if (!config || (config as any).bots.length === 0) {
-            res.status(400).json({ error: 'No bots configured' });
+        if (!config) {
+            res.status(400).json({ error: 'No Telegram configuration found' });
             return;
         }
 
-        const botTokens = (config as any).bots.map((b: any) => b.botToken);
+        // Get bot tokens - use system bots if user has useSystemBots=true
+        let botTokens: string[];
+        if (config.useSystemBots) {
+            const { getSystemBotTokens } = await import('./botController');
+            botTokens = getSystemBotTokens();
+            if (botTokens.length === 0) {
+                res.status(500).json({ error: 'System bots not configured' });
+                return;
+            }
+        } else {
+            if ((config as any).bots.length === 0) {
+                res.status(400).json({ error: 'No bots configured' });
+                return;
+            }
+            botTokens = (config as any).bots.map((b: any) => b.botToken);
+        }
 
         // Handle chunked files
         if (file.isChunked) {

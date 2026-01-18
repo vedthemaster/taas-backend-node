@@ -85,7 +85,25 @@ export const addBot = async (req: AuthRequest, res: Response): Promise<void> => 
                 data: {
                     userId,
                     channelId,
+                    useSystemBots: false,
                 },
+            });
+        } else if (config.useSystemBots) {
+            // User was using system bots, now adding their own - update to own channel
+            if (!channelId) {
+                res.status(400).json({ error: 'Channel ID is required when switching from system bots' });
+                return;
+            }
+            await prisma.telegramConfig.update({
+                where: { userId },
+                data: {
+                    useSystemBots: false,
+                    channelId,
+                },
+            });
+            // Refresh config
+            config = await prisma.telegramConfig.findUnique({
+                where: { userId },
             });
         }
 
@@ -202,6 +220,7 @@ export const updateChannelId = async (req: AuthRequest, res: Response): Promise<
 
 /**
  * Get bot tokens for a user (internal use)
+ * Returns system bots if user has useSystemBots=true
  */
 export const getBotTokensForUser = async (userId: string): Promise<string[]> => {
     const config = await prisma.telegramConfig.findUnique({
@@ -209,9 +228,39 @@ export const getBotTokensForUser = async (userId: string): Promise<string[]> => 
         include: { bots: { where: { isActive: true } } },
     });
 
-    if (!config || config.bots.length === 0) {
+    if (!config) {
+        return [];
+    }
+
+    // If user is using system bots, return system bot tokens
+    if (config.useSystemBots) {
+        return getSystemBotTokens();
+    }
+
+    // Otherwise return user's own bots
+    if (config.bots.length === 0) {
         return [];
     }
 
     return config.bots.map((b) => b.botToken);
+};
+
+/**
+ * Get system bot tokens from environment
+ */
+export const getSystemBotTokens = (): string[] => {
+    const tokens = process.env.SYSTEM_BOT_TOKENS || '';
+    if (!tokens) return [];
+    return tokens.split(',').map(t => t.trim()).filter(t => t.length > 0);
+};
+
+/**
+ * Check if user is using system bots (for file size limit enforcement)
+ */
+export const isUsingSystemBots = async (userId: string): Promise<boolean> => {
+    const config = await prisma.telegramConfig.findUnique({
+        where: { userId },
+        select: { useSystemBots: true },
+    });
+    return config?.useSystemBots ?? false;
 };

@@ -19,16 +19,17 @@ model User {
 }
 
 model TelegramConfig {
-  id        String         @id @default(uuid())
-  userId    String         @unique
-  channelId String         // Shared channel for all bots
-  botToken  String?        // Primary bot token for Telethon operations
-  apiId     String?        // Telegram API ID for MTProto
-  apiHash   String?        // Telegram API Hash for MTProto
-  createdAt DateTime       @default(now())
-  updatedAt DateTime       @updatedAt
-  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  bots      TelegramBot[]
+  id            String         @id @default(uuid())
+  userId        String         @unique
+  channelId     String         // Shared channel for all bots
+  botToken      String?        // Primary bot token for Telethon operations
+  apiId         String?        // Telegram API ID for MTProto
+  apiHash       String?        // Telegram API Hash for MTProto
+  useSystemBots Boolean        @default(false) // True if user skipped setup and uses system bots
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bots          TelegramBot[]
 }
 
 model TelegramBot {

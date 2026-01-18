@@ -56,6 +56,22 @@ export const initChunkedUpload = async (req: AuthRequest, res: Response): Promis
             return;
         }
 
+        // Check file size limit for system bot users (100MB)
+        const SYSTEM_BOT_LIMIT = 100 * 1024 * 1024; // 100MB
+        const config = await prisma.telegramConfig.findUnique({
+            where: { userId },
+        });
+
+        if (config?.useSystemBots && Number(size) > SYSTEM_BOT_LIMIT) {
+            res.status(413).json({
+                error: 'File size exceeds 100MB limit',
+                message: 'You are using shared system bots which have a 100MB file size limit. To upload larger files, please set up your own bot and channel in Settings.',
+                maxSize: SYSTEM_BOT_LIMIT,
+                useSystemBots: true,
+            });
+            return;
+        }
+
         const fileSize = BigInt(size);
         const totalChunks = Math.ceil(Number(size) / CHUNK_SIZE);
 
@@ -157,13 +173,29 @@ export const uploadChunk = async (req: AuthRequest, res: Response): Promise<void
             include: { bots: { where: { isActive: true } } },
         });
 
-        if (!config || (config as any).bots.length === 0) {
-            res.status(400).json({ error: 'No bots configured. Please add at least one bot.' });
+        if (!config) {
+            res.status(400).json({ error: 'No Telegram configuration found. Please complete setup.' });
             return;
         }
 
+        // Get bot tokens - use system bots if user has useSystemBots=true
+        let botTokens: string[];
+        if (config.useSystemBots) {
+            const { getSystemBotTokens } = await import('./botController');
+            botTokens = getSystemBotTokens();
+            if (botTokens.length === 0) {
+                res.status(500).json({ error: 'System bots not configured. Please contact administrator.' });
+                return;
+            }
+        } else {
+            if ((config as any).bots.length === 0) {
+                res.status(400).json({ error: 'No bots configured. Please add at least one bot.' });
+                return;
+            }
+            botTokens = (config as any).bots.map((b: any) => b.botToken);
+        }
+
         // Upload chunk to Telegram via Python service (multi-bot)
-        const botTokens = (config as any).bots.map((b: any) => b.botToken);
         const result = await uploadToTelegram(
             {
                 channelId: config.channelId,
@@ -358,9 +390,26 @@ export const downloadChunkedFile = async (req: AuthRequest, res: Response): Prom
             include: { bots: { where: { isActive: true } } },
         });
 
-        if (!config || (config as any).bots.length === 0) {
-            res.status(400).json({ error: 'No bots configured' });
+        if (!config) {
+            res.status(400).json({ error: 'No Telegram configuration found' });
             return;
+        }
+
+        // Get bot tokens - use system bots if user has useSystemBots=true
+        let botTokens: string[];
+        if (config.useSystemBots) {
+            const { getSystemBotTokens } = await import('./botController');
+            botTokens = getSystemBotTokens();
+            if (botTokens.length === 0) {
+                res.status(500).json({ error: 'System bots not configured' });
+                return;
+            }
+        } else {
+            if ((config as any).bots.length === 0) {
+                res.status(400).json({ error: 'No bots configured' });
+                return;
+            }
+            botTokens = (config as any).bots.map((b: any) => b.botToken);
         }
 
         // Set streaming headers
@@ -373,7 +422,6 @@ export const downloadChunkedFile = async (req: AuthRequest, res: Response): Prom
         const { downloadByFileIdsStream } = await import('../lib/pythonService');
 
         const fileIds = (file as any).chunks.map((c: any) => c.telegramFileId);
-        const botTokens = (config as any).bots.map((b: any) => b.botToken);
 
         const { stream } = await downloadByFileIdsStream(
             {
