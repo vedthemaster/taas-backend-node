@@ -21,13 +21,13 @@ import { authMiddleware } from '../middleware/authMiddleware';
 
 const router = Router();
 
-// Configure multer for file uploads
+// Configure multer for standard file uploads (disk storage for small files)
 const tempDir = path.join(process.cwd(), 'temp');
 if (!fs.existsSync(tempDir)) {
     fs.mkdirSync(tempDir, { recursive: true });
 }
 
-const storage = multer.diskStorage({
+const diskStorage = multer.diskStorage({
     destination: (req, file, cb) => {
         cb(null, tempDir);
     },
@@ -38,35 +38,40 @@ const storage = multer.diskStorage({
 });
 
 const upload = multer({
-    storage,
+    storage: diskStorage,
     limits: {
-        fileSize: 2 * 1024 * 1024 * 1024, // 2GB limit (Telegram MTProto limit)
+        fileSize: 2 * 1024 * 1024 * 1024, // 2GB limit
     },
 });
 
-// Chunked upload for large files (32MB chunks)
+// Chunked upload uses MEMORY storage - no disk writes!
+// Chunks are buffered in memory and streamed directly to Telegram
 const chunkUpload = multer({
-    storage,
+    storage: multer.memoryStorage(),
     limits: {
-        fileSize: 20 * 1024 * 1024, // 20MB to allow overhead for 16MB chunks
+        fileSize: 20 * 1024 * 1024, // 20MB to allow overhead for 19MB chunks
     },
 });
 
-// Standard file routes
-router.get('/', authMiddleware, getFiles);
-router.get('/:id', authMiddleware, getFile);
-router.post('/upload', authMiddleware, upload.single('file'), uploadFile);
-router.get('/:id/download', authMiddleware, downloadFile);
-router.patch('/:id/move', authMiddleware, moveFile);
-router.delete('/:id', authMiddleware, deleteFile);
-
-// Chunked upload routes
+// Chunked upload routes (more specific paths first)
 router.post('/upload/init', authMiddleware, initChunkedUpload);
 router.post('/upload/chunk/:uploadId', authMiddleware, chunkUpload.single('chunk'), uploadChunk);
 router.post('/upload/complete/:uploadId', authMiddleware, completeChunkedUpload);
 router.delete('/upload/:uploadId', authMiddleware, cancelChunkedUpload);
 
-// Streaming download for chunked files
+// Standard file routes - order matters! More specific routes first
+router.get('/', authMiddleware, getFiles);
+router.post('/upload', authMiddleware, upload.single('file'), uploadFile);
+
+// Streaming download for chunked files (must come before /:id/download)
 router.get('/:id/download/stream', authMiddleware, downloadChunkedFile);
+
+// Standard download and other file operations
+router.get('/:id/download', authMiddleware, downloadFile);
+router.patch('/:id/move', authMiddleware, moveFile);
+router.delete('/:id', authMiddleware, deleteFile);
+
+// Get single file (most generic - must be last)
+router.get('/:id', authMiddleware, getFile);
 
 export default router;

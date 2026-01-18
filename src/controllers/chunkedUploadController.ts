@@ -1,12 +1,44 @@
 import { Response } from 'express';
+import { v4 as uuidv4 } from 'uuid';
 import prisma from '../lib/prisma';
 import { AuthRequest } from '../middleware/authMiddleware';
-import { uploadToTelegram } from '../lib/pythonService';
-import fs from 'fs';
-import path from 'path';
+import { uploadChunkToTelegram, downloadFileFromTelegram, deleteMessageFromTelegram } from '../lib/telegramStreamApi';
 
-const CHUNK_SIZE = 16 * 1024 * 1024; // 16 MB
-const CHUNK_THRESHOLD = 16 * 1024 * 1024; // 16 MB - all files >16MB get chunked
+const CHUNK_SIZE = 19 * 1024 * 1024; // 19 MB (Telegram download limit is 20MB)
+
+// In-memory upload session store
+// Key: uploadId, Value: session data
+interface UploadSession {
+    userId: string;
+    filename: string;
+    size: bigint;
+    mimeType: string;
+    folderId: string | null;
+    totalChunks: number;
+    chunks: Map<number, {
+        telegramFileId: string;
+        telegramMsgId: number;
+        channelId: string;
+        size: bigint;
+    }>;
+    createdAt: Date;
+}
+
+const uploadSessions: Map<string, UploadSession> = new Map();
+
+// Cleanup old sessions (older than 24 hours)
+const cleanupOldSessions = () => {
+    const now = Date.now();
+    const maxAge = 24 * 60 * 60 * 1000; // 24 hours
+    for (const [id, session] of uploadSessions.entries()) {
+        if (now - session.createdAt.getTime() > maxAge) {
+            uploadSessions.delete(id);
+        }
+    }
+};
+
+// Run cleanup every hour
+setInterval(cleanupOldSessions, 60 * 60 * 1000);
 
 // Helper to generate unique filename for duplicates
 const getUniqueFilename = async (
@@ -40,6 +72,7 @@ const getUniqueFilename = async (
 /**
  * Initialize a chunked upload
  * POST /api/files/upload/init
+ * Creates an in-memory session, NOT a database record
  */
 export const initChunkedUpload = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
@@ -86,27 +119,30 @@ export const initChunkedUpload = async (req: AuthRequest, res: Response): Promis
             }
         }
 
-        // Get unique filename
-        const uniqueFilename = await getUniqueFilename(filename, folderId || null, userId);
+        // Generate upload ID (NOT stored in database yet)
+        const uploadId = uuidv4();
 
-        // Create file record with isChunked = true
-        const file = await prisma.file.create({
-            data: {
-                name: uniqueFilename,
-                size: fileSize,
-                mimeType,
-                isChunked: true,
-                totalChunks,
-                folderId: folderId || null,
-                userId,
-            },
-        });
+        // Create in-memory session
+        const session: UploadSession = {
+            userId,
+            filename,
+            size: fileSize,
+            mimeType,
+            folderId: folderId || null,
+            totalChunks,
+            chunks: new Map(),
+            createdAt: new Date(),
+        };
 
-        res.status(201).json({
-            uploadId: file.id,
+        uploadSessions.set(uploadId, session);
+
+        console.log(`📤 INIT UPLOAD: ${filename} (${(Number(size) / (1024 * 1024)).toFixed(2)} MB, ${totalChunks} chunks)`);
+
+        res.json({
+            uploadId,
+            filename,
             totalChunks,
             chunkSize: CHUNK_SIZE,
-            filename: uniqueFilename,
         });
     } catch (error) {
         console.error('Init chunked upload error:', error);
@@ -115,8 +151,9 @@ export const initChunkedUpload = async (req: AuthRequest, res: Response): Promis
 };
 
 /**
- * Upload a single chunk
+ * Upload a chunk (memory-based, streams directly to Telegram)
  * POST /api/files/upload/chunk/:uploadId
+ * Stores chunk info in memory session, NOT in database
  */
 export const uploadChunk = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
@@ -130,7 +167,7 @@ export const uploadChunk = async (req: AuthRequest, res: Response): Promise<void
             return;
         }
 
-        if (!chunk) {
+        if (!chunk || !chunk.buffer) {
             res.status(400).json({ error: 'No chunk data provided' });
             return;
         }
@@ -140,37 +177,31 @@ export const uploadChunk = async (req: AuthRequest, res: Response): Promise<void
             return;
         }
 
-        // Verify file belongs to user
-        const file = await prisma.file.findFirst({
-            where: { id: String(uploadId), userId, isChunked: true },
-        });
-
-        if (!file) {
-            res.status(404).json({ error: 'Upload not found' });
+        // Get session from memory
+        const session = uploadSessions.get(uploadId);
+        if (!session || session.userId !== userId) {
+            res.status(404).json({ error: 'Upload session not found or expired' });
             return;
         }
 
-        // Check if chunk already exists
-        const existingChunk = await prisma.fileChunk.findUnique({
-            where: { fileId_chunkIndex: { fileId: String(uploadId), chunkIndex } },
-        });
-
-        if (existingChunk) {
-            // Chunk already uploaded, skip
-            fs.unlinkSync(chunk.path);
+        // Check if chunk already uploaded
+        if (session.chunks.has(chunkIndex)) {
             res.json({
                 chunkIndex,
                 status: 'already_uploaded',
-                uploadedChunks: await prisma.fileChunk.count({ where: { fileId: String(uploadId) } }),
-                totalChunks: file.totalChunks,
+                uploadedChunks: session.chunks.size,
+                totalChunks: session.totalChunks,
             });
             return;
         }
 
-        // Get Telegram config with bots
+        // Get Telegram config with bots and channels
         const config = await prisma.telegramConfig.findUnique({
             where: { userId },
-            include: { bots: { where: { isActive: true } } },
+            include: {
+                bots: { where: { isActive: true } },
+                channels: { where: { isActive: true } },
+            },
         });
 
         if (!config) {
@@ -178,7 +209,7 @@ export const uploadChunk = async (req: AuthRequest, res: Response): Promise<void
             return;
         }
 
-        // Get bot tokens - use system bots if user has useSystemBots=true
+        // Get bot tokens
         let botTokens: string[];
         if (config.useSystemBots) {
             const { getSystemBotTokens } = await import('./botController');
@@ -195,37 +226,59 @@ export const uploadChunk = async (req: AuthRequest, res: Response): Promise<void
             botTokens = (config as any).bots.map((b: any) => b.botToken);
         }
 
-        // Upload chunk to Telegram via Python service (multi-bot)
-        const result = await uploadToTelegram(
-            {
-                channelId: config.channelId,
-                botTokens,
-            },
-            chunk.path,
-            `📁 ${file.name} - Chunk ${chunkIndex + 1}/${file.totalChunks}`
+        // Build channel list
+        const channelIds = [config.channelId];
+        if ((config as any).channels && (config as any).channels.length > 0) {
+            for (const ch of (config as any).channels) {
+                if (!channelIds.includes(ch.channelId)) {
+                    channelIds.push(ch.channelId);
+                }
+            }
+        }
+
+        // Get available bot+channel slot
+        let botToken: string;
+        let targetChannelId: string;
+
+        if (channelIds.length > 1) {
+            const { getMultiChannelBotPool } = await import('../lib/telegramBotPool');
+            const multiPool = getMultiChannelBotPool(botTokens, channelIds);
+            const slot = await multiPool.getAvailableSlot();
+            botToken = slot.botToken;
+            targetChannelId = slot.channelId;
+        } else {
+            const { getBotPool } = await import('../lib/telegramBotPool');
+            const botPool = getBotPool(config.channelId, botTokens);
+            botToken = await botPool.getAvailableBot();
+            targetChannelId = config.channelId;
+        }
+
+        // Upload chunk to Telegram
+        const caption = `📁 ${session.filename} - Chunk ${chunkIndex + 1}/${session.totalChunks}`;
+        const result = await uploadChunkToTelegram(
+            chunk.buffer,
+            targetChannelId,
+            botToken,
+            `chunk_${chunkIndex}.bin`,
+            caption
         );
 
-        // Save chunk metadata
-        await prisma.fileChunk.create({
-            data: {
-                fileId: String(uploadId),
-                chunkIndex,
-                telegramFileId: result.file_id,
-                telegramMsgId: result.message_id,
-                size: BigInt(chunk.size),
-            },
+        // Store chunk info in session (NOT in database)
+        session.chunks.set(chunkIndex, {
+            telegramFileId: result.fileId,
+            telegramMsgId: result.messageId,
+            channelId: targetChannelId,
+            size: BigInt(chunk.size),
         });
 
-        // Note: Python service deletes the temp file with delete_after: true
-
-        const uploadedChunks = await prisma.fileChunk.count({ where: { fileId: String(uploadId) } });
+        console.log(`  ✅ Chunk ${chunkIndex + 1}/${session.totalChunks} uploaded (${(chunk.size / (1024 * 1024)).toFixed(2)} MB)`);
 
         res.json({
             chunkIndex,
             status: 'uploaded',
-            uploadedChunks,
-            totalChunks: file.totalChunks,
-            progress: Math.round((uploadedChunks / (file.totalChunks || 1)) * 100),
+            uploadedChunks: session.chunks.size,
+            totalChunks: session.totalChunks,
+            progress: Math.round((session.chunks.size / session.totalChunks) * 100),
         });
     } catch (error) {
         console.error('Upload chunk error:', error);
@@ -236,6 +289,7 @@ export const uploadChunk = async (req: AuthRequest, res: Response): Promise<void
 /**
  * Complete a chunked upload
  * POST /api/files/upload/complete/:uploadId
+ * Creates the file and chunk records in database ONLY when complete
  */
 export const completeChunkedUpload = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
@@ -247,38 +301,67 @@ export const completeChunkedUpload = async (req: AuthRequest, res: Response): Pr
             return;
         }
 
-        // Verify file belongs to user
-        const file = await prisma.file.findFirst({
-            where: { id: String(uploadId), userId, isChunked: true },
-        });
-
-        if (!file) {
-            res.status(404).json({ error: 'Upload not found' });
+        // Get session from memory
+        const session = uploadSessions.get(uploadId);
+        if (!session || session.userId !== userId) {
+            res.status(404).json({ error: 'Upload session not found or expired' });
             return;
         }
 
-        // Verify all chunks are uploaded
-        const uploadedChunks = await prisma.fileChunk.count({ where: { fileId: String(uploadId) } });
-
-        if (uploadedChunks !== file.totalChunks) {
+        // Check all chunks uploaded
+        if (session.chunks.size < session.totalChunks) {
             res.status(400).json({
                 error: 'Upload incomplete',
-                uploadedChunks,
-                expectedChunks: file.totalChunks,
+                uploadedChunks: session.chunks.size,
+                totalChunks: session.totalChunks,
             });
             return;
         }
 
+        // Get unique filename (check again at completion time)
+        const uniqueFilename = await getUniqueFilename(session.filename, session.folderId, userId);
+
+        // Create file record in database
+        const file = await prisma.file.create({
+            data: {
+                name: uniqueFilename,
+                size: session.size,
+                mimeType: session.mimeType,
+                folderId: session.folderId,
+                userId,
+                isChunked: true,
+                totalChunks: session.totalChunks,
+            },
+        });
+
+        // Create chunk records in database
+        const chunkData = Array.from(session.chunks.entries()).map(([index, chunk]) => ({
+            fileId: file.id,
+            chunkIndex: index,
+            telegramFileId: chunk.telegramFileId,
+            telegramMsgId: chunk.telegramMsgId,
+            channelId: chunk.channelId,
+            size: chunk.size,
+        }));
+
+        await prisma.fileChunk.createMany({
+            data: chunkData,
+        });
+
+        // Remove session from memory
+        uploadSessions.delete(uploadId);
+
+        console.log(`✅ UPLOAD COMPLETE: ${uniqueFilename}`);
+
         res.json({
-            success: true,
             file: {
                 id: file.id,
                 name: file.name,
                 size: file.size.toString(),
                 mimeType: file.mimeType,
-                isChunked: file.isChunked,
-                totalChunks: file.totalChunks,
+                createdAt: file.createdAt,
             },
+            message: 'Upload completed successfully',
         });
     } catch (error) {
         console.error('Complete chunked upload error:', error);
@@ -287,8 +370,9 @@ export const completeChunkedUpload = async (req: AuthRequest, res: Response): Pr
 };
 
 /**
- * Cancel/abort a chunked upload
+ * Cancel a chunked upload
  * DELETE /api/files/upload/:uploadId
+ * Deletes chunks from Telegram but NOT from database (since nothing was stored)
  */
 export const cancelChunkedUpload = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
@@ -300,56 +384,48 @@ export const cancelChunkedUpload = async (req: AuthRequest, res: Response): Prom
             return;
         }
 
-        // Verify file belongs to user
-        const file = await prisma.file.findFirst({
-            where: { id: String(uploadId), userId, isChunked: true },
-            include: { chunks: true },
-        });
-
-        if (!file) {
-            res.status(404).json({ error: 'Upload not found' });
+        // Get session from memory
+        const session = uploadSessions.get(uploadId);
+        if (!session || session.userId !== userId) {
+            res.status(404).json({ error: 'Upload session not found or expired' });
             return;
         }
 
-        // Delete chunks from Telegram via Bot HTTP API (if any uploaded)
-        if ((file as any).chunks.length > 0) {
-            try {
-                const config = await prisma.telegramConfig.findUnique({
-                    where: { userId },
-                    include: { bots: { where: { isActive: true } } },
-                });
+        // Try to delete chunks from Telegram
+        if (session.chunks.size > 0) {
+            const config = await prisma.telegramConfig.findUnique({
+                where: { userId },
+                include: { bots: { where: { isActive: true } } },
+            });
 
-                if (config && (config as any).bots.length > 0) {
-                    const { deleteFileFromTelegram } = await import('../lib/telegramBotApi');
-                    const firstBotToken = (config as any).bots[0].botToken;
-                    const msgIds = (file as any).chunks.map((c: any) => c.telegramMsgId);
-                    await deleteFileFromTelegram(firstBotToken, config.channelId, msgIds);
+            if (config) {
+                let botToken: string | null = null;
+                if (config.useSystemBots) {
+                    const { getSystemBotTokens } = await import('./botController');
+                    const tokens = getSystemBotTokens();
+                    botToken = tokens[0] || null;
+                } else if ((config as any).bots.length > 0) {
+                    botToken = (config as any).bots[0].botToken;
                 }
-            } catch (telegramError) {
-                console.warn('Failed to delete chunks from Telegram:', telegramError);
-            }
-        }
 
-        // Clean up any remaining temp files for this upload
-        const tempDir = path.join(process.cwd(), 'temp');
-        if (fs.existsSync(tempDir)) {
-            const files = fs.readdirSync(tempDir);
-            const uploadPrefix = file.id;
-            for (const tempFile of files) {
-                if (tempFile.includes(uploadPrefix)) {
-                    try {
-                        fs.unlinkSync(path.join(tempDir, tempFile));
-                    } catch (e) {
-                        // Ignore cleanup errors
+                if (botToken) {
+                    for (const chunk of session.chunks.values()) {
+                        try {
+                            await deleteMessageFromTelegram(chunk.channelId, chunk.telegramMsgId, botToken);
+                        } catch (e) {
+                            console.warn('Failed to delete chunk from Telegram:', e);
+                        }
                     }
                 }
             }
         }
 
-        // Delete file (cascades to chunks)
-        await prisma.file.delete({ where: { id: String(uploadId) } });
+        // Remove session from memory (nothing in database to delete)
+        uploadSessions.delete(uploadId);
 
-        res.json({ success: true, message: 'Upload cancelled' });
+        console.log(`🚫 UPLOAD CANCELLED: ${session.filename}`);
+
+        res.json({ message: 'Upload cancelled' });
     } catch (error) {
         console.error('Cancel chunked upload error:', error);
         res.status(500).json({ error: 'Failed to cancel upload' });
@@ -357,7 +433,7 @@ export const cancelChunkedUpload = async (req: AuthRequest, res: Response): Prom
 };
 
 /**
- * Download a chunked file (streaming via Python service)
+ * Download a chunked file (streams directly from Telegram)
  * GET /api/files/:id/download/stream
  */
 export const downloadChunkedFile = async (req: AuthRequest, res: Response): Promise<void> => {
@@ -395,7 +471,7 @@ export const downloadChunkedFile = async (req: AuthRequest, res: Response): Prom
             return;
         }
 
-        // Get bot tokens - use system bots if user has useSystemBots=true
+        // Get bot tokens
         let botTokens: string[];
         if (config.useSystemBots) {
             const { getSystemBotTokens } = await import('./botController');
@@ -414,24 +490,34 @@ export const downloadChunkedFile = async (req: AuthRequest, res: Response): Prom
 
         // Set streaming headers
         res.setHeader('Content-Type', file.mimeType);
-        res.setHeader('Content-Disposition', `attachment; filename="${file.name}"`);
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.name)}"`);
         res.setHeader('Content-Length', file.size.toString());
         res.setHeader('X-Total-Chunks', (file as any).chunks.length.toString());
 
-        // Use Python service for file_id based streaming download
-        const { downloadByFileIdsStream } = await import('../lib/pythonService');
+        console.log(`📥 DOWNLOAD: ${file.name} (${(file as any).chunks.length} chunks)`);
 
-        const fileIds = (file as any).chunks.map((c: any) => c.telegramFileId);
+        const { getBotPool } = await import('../lib/telegramBotPool');
+        const defaultPool = getBotPool(config.channelId, botTokens);
 
-        const { stream } = await downloadByFileIdsStream(
-            {
-                channelId: config.channelId,
-                botTokens,
-            },
-            fileIds
-        );
+        // Stream chunks in order
+        for (const chunk of (file as any).chunks) {
+            const token = await defaultPool.getAvailableBot();
+            const { stream } = await downloadFileFromTelegram(chunk.telegramFileId, token);
 
-        stream.pipe(res);
+            await new Promise<void>((resolve, reject) => {
+                stream.on('data', (data: Buffer) => {
+                    res.write(data);
+                });
+                stream.on('end', () => {
+                    console.log(`  📦 Chunk ${chunk.chunkIndex + 1} streamed`);
+                    resolve();
+                });
+                stream.on('error', reject);
+            });
+        }
+
+        res.end();
+        console.log(`✅ DOWNLOAD COMPLETE: ${file.name}`);
     } catch (error) {
         console.error('Download chunked file error:', error);
         if (!res.headersSent) {
