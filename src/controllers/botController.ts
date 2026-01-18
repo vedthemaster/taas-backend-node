@@ -107,6 +107,12 @@ export const addBot = async (req: AuthRequest, res: Response): Promise<void> => 
             });
         }
 
+        // Ensure config exists after potential creation/refresh
+        if (!config) {
+            res.status(500).json({ error: 'Failed to get Telegram configuration' });
+            return;
+        }
+
         // Check if bot already exists
         const existingBot = await prisma.telegramBot.findFirst({
             where: {

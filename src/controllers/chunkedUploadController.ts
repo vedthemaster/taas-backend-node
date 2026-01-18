@@ -158,7 +158,7 @@ export const initChunkedUpload = async (req: AuthRequest, res: Response): Promis
 export const uploadChunk = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const userId = req.userId;
-        const { uploadId } = req.params;
+        const uploadId = String(req.params.uploadId);
         const chunkIndex = parseInt(req.body.chunkIndex);
         const chunk = req.file;
 
@@ -294,7 +294,7 @@ export const uploadChunk = async (req: AuthRequest, res: Response): Promise<void
 export const completeChunkedUpload = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const userId = req.userId;
-        const { uploadId } = req.params;
+        const uploadId = String(req.params.uploadId);
 
         if (!userId) {
             res.status(401).json({ error: 'Not authenticated' });
@@ -377,7 +377,7 @@ export const completeChunkedUpload = async (req: AuthRequest, res: Response): Pr
 export const cancelChunkedUpload = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const userId = req.userId;
-        const { uploadId } = req.params;
+        const uploadId = String(req.params.uploadId);
 
         if (!userId) {
             res.status(401).json({ error: 'Not authenticated' });

@@ -176,7 +176,7 @@ export const addChannel = async (req: AuthRequest, res: Response): Promise<void>
 export const removeChannel = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const userId = req.userId;
-        const { id } = req.params;
+        const id = String(req.params.id);
 
         if (!userId) {
             res.status(401).json({ error: 'Not authenticated' });
@@ -204,7 +204,7 @@ export const removeChannel = async (req: AuthRequest, res: Response): Promise<vo
 
         // Delete the channel
         await prisma.telegramChannel.delete({
-            where: { id },
+            where: { id: channel.id },
         });
 
         res.json({ message: 'Channel removed successfully' });
@@ -221,7 +221,7 @@ export const removeChannel = async (req: AuthRequest, res: Response): Promise<vo
 export const updateChannel = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const userId = req.userId;
-        const { id } = req.params;
+        const id = String(req.params.id);
         const { name, isActive } = req.body;
 
         if (!userId) {
@@ -250,7 +250,7 @@ export const updateChannel = async (req: AuthRequest, res: Response): Promise<vo
 
         // Update the channel
         const updated = await prisma.telegramChannel.update({
-            where: { id },
+            where: { id: channel.id },
             data: {
                 name: name !== undefined ? name : channel.name,
                 isActive: isActive !== undefined ? isActive : channel.isActive,
