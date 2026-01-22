@@ -7,8 +7,14 @@
 import axios from 'axios';
 import FormData from 'form-data';
 import { Readable } from 'stream';
+import http from 'http';
+import https from 'https';
 
 const TELEGRAM_API_BASE = 'https://api.telegram.org/bot';
+
+// Keep-alive agents to reuse TCP connections (critical for free hosting tiers)
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 10 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 10 });
 
 // Timeout for large file uploads (5 minutes)
 const UPLOAD_TIMEOUT_MS = 300000;
@@ -80,6 +86,8 @@ async function uploadOnce(
         timeout: UPLOAD_TIMEOUT_MS,
         maxContentLength: Infinity,
         maxBodyLength: Infinity,
+        httpAgent,
+        httpsAgent,
     });
 
     if (!response.data.ok) {
@@ -101,6 +109,8 @@ async function getFileInfo(fileId: string, botToken: string): Promise<{ filePath
 
     const response = await axios.post(url, { file_id: fileId }, {
         timeout: 30000,
+        httpAgent,
+        httpsAgent,
     });
 
     if (!response.data.ok) {
@@ -128,6 +138,8 @@ export async function downloadFileFromTelegram(
     const response = await axios.get(downloadUrl, {
         responseType: 'stream',
         timeout: DOWNLOAD_TIMEOUT_MS,
+        httpAgent,
+        httpsAgent,
     });
 
     const size = parseInt(response.headers['content-length'] || '0', 10);
