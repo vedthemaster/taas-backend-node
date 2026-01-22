@@ -10,7 +10,10 @@ datasource db {
 model User {
   id             String          @id @default(uuid())
   email          String          @unique
-  password       String
+  password       String?         // Optional for Google OAuth users
+  googleId       String?         @unique // Google user ID
+  name           String?         // User's display name
+  picture        String?         // Profile picture URL
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
   telegramConfig TelegramConfig?

@@ -3,7 +3,8 @@ import prisma from '../lib/prisma';
 import { AuthRequest } from '../middleware/authMiddleware';
 import axios from 'axios';
 
-const PYTHON_SERVICE_URL = process.env.PYTHON_SERVICE_URL || 'http://localhost:5001';
+// Telegram Bot API URL
+const TELEGRAM_API_URL = 'https://api.telegram.org';
 
 /**
  * Get all bots for the current user
@@ -60,13 +61,29 @@ export const addBot = async (req: AuthRequest, res: Response): Promise<void> => 
             return;
         }
 
-        // Verify the bot token with Python service
-        const verification = await axios.post(`${PYTHON_SERVICE_URL}/verify-bot`, {
-            bot_token: botToken,
-        });
+        // Verify the bot token directly with Telegram API
+        let verification: { valid: boolean; data?: { username: string }; error?: string };
 
-        if (!verification.data.valid) {
-            res.status(400).json({ error: `Invalid bot token: ${verification.data.error}` });
+        try {
+            const response = await axios.get(`${TELEGRAM_API_URL}/bot${botToken}/getMe`, {
+                timeout: 10000,
+            });
+
+            if (response.data.ok && response.data.result) {
+                verification = {
+                    valid: true,
+                    data: { username: response.data.result.username },
+                };
+            } else {
+                verification = { valid: false, error: 'Invalid response from Telegram' };
+            }
+        } catch (err: any) {
+            const errorMsg = err.response?.data?.description || err.message || 'Failed to verify bot';
+            verification = { valid: false, error: errorMsg };
+        }
+
+        if (!verification.valid) {
+            res.status(400).json({ error: `Invalid bot token: ${verification.error}` });
             return;
         }
 
@@ -131,7 +148,7 @@ export const addBot = async (req: AuthRequest, res: Response): Promise<void> => 
             data: {
                 configId: config.id,
                 botToken,
-                botUsername: verification.data.username,
+                botUsername: verification.data?.username || 'Unknown',
             },
         });
 

@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
-import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { OAuth2Client } from 'google-auth-library';
 import prisma from '../lib/prisma';
 import { AuthRequest } from '../middleware/authMiddleware';
 
@@ -12,101 +12,103 @@ const generateToken = (userId: string): string => {
     return jwt.sign({ userId }, jwtSecret, { expiresIn: '7d' });
 };
 
-export const register = async (req: Request, res: Response): Promise<void> => {
-    try {
-        const { email, password } = req.body;
-
-        if (!email || !password) {
-            res.status(400).json({ error: 'Email and password are required' });
-            return;
-        }
-
-        // Check if user already exists
-        const existingUser = await prisma.user.findUnique({
-            where: { email },
-        });
-
-        if (existingUser) {
-            res.status(409).json({ error: 'User with this email already exists' });
-            return;
-        }
-
-        // Hash password
-        const hashedPassword = await bcrypt.hash(password, 12);
-
-        // Create user
-        const user = await prisma.user.create({
-            data: {
-                email,
-                password: hashedPassword,
-            },
-            select: {
-                id: true,
-                email: true,
-                createdAt: true,
-            },
-        });
-
-        // Generate token
-        const token = generateToken(user.id);
-
-        res.status(201).json({
-            message: 'User created successfully',
-            user: {
-                ...user,
-                hasTelegramConfig: false,
-                useSystemBots: false,
-                maxUploadSize: 2 * 1024 * 1024 * 1024, // 2GB default for new users
-            },
-            token,
-        });
-    } catch (error) {
-        console.error('Registration error:', error);
-        res.status(500).json({ error: 'Failed to register user' });
+// Initialize Google OAuth client
+const getGoogleClient = () => {
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    if (!clientId) {
+        throw new Error('GOOGLE_CLIENT_ID not configured');
     }
+    return new OAuth2Client(clientId);
 };
 
-export const login = async (req: Request, res: Response): Promise<void> => {
+/**
+ * Google Sign-In
+ * POST /api/auth/google
+ * Receives Google ID token, verifies it, creates/updates user
+ */
+export const googleSignIn = async (req: Request, res: Response): Promise<void> => {
     try {
-        const { email, password } = req.body;
+        const { credential } = req.body;
 
-        if (!email || !password) {
-            res.status(400).json({ error: 'Email and password are required' });
+        if (!credential) {
+            res.status(400).json({ error: 'Google credential is required' });
             return;
         }
 
-        // Find user
-        const user = await prisma.user.findUnique({
-            where: { email },
+        // Verify the Google ID token
+        const client = getGoogleClient();
+        const ticket = await client.verifyIdToken({
+            idToken: credential,
+            audience: process.env.GOOGLE_CLIENT_ID,
+        });
+
+        const payload = ticket.getPayload();
+        if (!payload) {
+            res.status(401).json({ error: 'Invalid Google token' });
+            return;
+        }
+
+        const { sub: googleId, email, name, picture } = payload;
+
+        if (!email) {
+            res.status(400).json({ error: 'Email not provided by Google' });
+            return;
+        }
+
+        // Find or create user
+        let user = await prisma.user.findFirst({
+            where: {
+                OR: [
+                    { googleId },
+                    { email },
+                ],
+            },
             include: {
                 telegramConfig: true,
             },
         });
 
-        if (!user) {
-            res.status(401).json({ error: 'Invalid email or password' });
-            return;
+        if (user) {
+            // Update Google info if changed
+            user = await prisma.user.update({
+                where: { id: user.id },
+                data: {
+                    googleId,
+                    name: name || user.name,
+                    picture: picture || user.picture,
+                },
+                include: {
+                    telegramConfig: true,
+                },
+            });
+        } else {
+            // Create new user
+            user = await prisma.user.create({
+                data: {
+                    email,
+                    googleId,
+                    name,
+                    picture,
+                },
+                include: {
+                    telegramConfig: true,
+                },
+            });
         }
 
-        // Verify password
-        const isPasswordValid = await bcrypt.compare(password, user.password);
-
-        if (!isPasswordValid) {
-            res.status(401).json({ error: 'Invalid email or password' });
-            return;
-        }
-
-        // Generate token
+        // Generate JWT token
         const token = generateToken(user.id);
 
         const useSystemBots = user.telegramConfig?.useSystemBots ?? false;
-        const maxUploadSize = useSystemBots ? 100 * 1024 * 1024 : 2 * 1024 * 1024 * 1024; // 100MB or 2GB
+        const maxUploadSize = useSystemBots ? 100 * 1024 * 1024 : 2 * 1024 * 1024 * 1024;
 
         res.json({
             message: 'Login successful',
             user: {
                 id: user.id,
                 email: user.email,
+                name: user.name,
+                picture: user.picture,
                 createdAt: user.createdAt,
                 hasTelegramConfig: !!user.telegramConfig,
                 useSystemBots,
@@ -114,12 +116,41 @@ export const login = async (req: Request, res: Response): Promise<void> => {
             },
             token,
         });
-    } catch (error) {
-        console.error('Login error:', error);
-        res.status(500).json({ error: 'Failed to login' });
+    } catch (error: any) {
+        console.error('Google sign-in error:', error?.message || error);
+
+        // Handle specific error cases
+        if (error.message?.includes('GOOGLE_CLIENT_ID')) {
+            res.status(500).json({ error: 'Server configuration error. Google Client ID not set.' });
+            return;
+        }
+
+        if (error.message?.includes('Token used too late') || error.message?.includes('Invalid token signature')) {
+            res.status(401).json({ error: 'Google sign-in expired. Please try again.' });
+            return;
+        }
+
+        if (error.message?.includes('Wrong recipient') || error.message?.includes('audience')) {
+            res.status(401).json({ error: 'Invalid Google credentials configuration.' });
+            return;
+        }
+
+        if (error.code === 'P2002') {
+            res.status(409).json({ error: 'An account with this email already exists.' });
+            return;
+        }
+
+        res.status(500).json({
+            error: 'Failed to sign in with Google',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
     }
 };
 
+/**
+ * Get current user info
+ * GET /api/auth/me
+ */
 export const getMe = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const userId = req.userId;
@@ -134,6 +165,8 @@ export const getMe = async (req: AuthRequest, res: Response): Promise<void> => {
             select: {
                 id: true,
                 email: true,
+                name: true,
+                picture: true,
                 createdAt: true,
                 telegramConfig: {
                     select: {
@@ -152,7 +185,7 @@ export const getMe = async (req: AuthRequest, res: Response): Promise<void> => {
         }
 
         const useSystemBots = user.telegramConfig?.useSystemBots ?? false;
-        const maxUploadSize = useSystemBots ? 100 * 1024 * 1024 : 2 * 1024 * 1024 * 1024; // 100MB or 2GB
+        const maxUploadSize = useSystemBots ? 100 * 1024 * 1024 : 2 * 1024 * 1024 * 1024;
 
         res.json({
             user: {
