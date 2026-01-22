@@ -10,7 +10,10 @@ datasource db {
 model User {
   id             String          @id @default(uuid())
   email          String          @unique
-  password       String
+  password       String?         // Optional for Google OAuth users
+  googleId       String?         @unique // Google user ID
+  name           String?         // User's display name
+  picture        String?         // Profile picture URL
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
   telegramConfig TelegramConfig?
@@ -19,16 +22,31 @@ model User {
 }
 
 model TelegramConfig {
+  id            String            @id @default(uuid())
+  userId        String            @unique
+  channelId     String            // Primary/default channel for all bots
+  botToken      String?           // Primary bot token for Telethon operations
+  apiId         String?           // Telegram API ID for MTProto
+  apiHash       String?           // Telegram API Hash for MTProto
+  useSystemBots Boolean           @default(false) // True if user skipped setup and uses system bots
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bots          TelegramBot[]
+  channels      TelegramChannel[] // Additional channels for throughput
+}
+
+model TelegramChannel {
   id        String         @id @default(uuid())
-  userId    String         @unique
-  channelId String         // Shared channel for all bots
-  botToken  String?        // Primary bot token for Telethon operations
-  apiId     String?        // Telegram API ID for MTProto
-  apiHash   String?        // Telegram API Hash for MTProto
+  configId  String
+  channelId String         // Telegram channel ID (e.g., -1001234567890)
+  name      String?        // Optional friendly name
+  isActive  Boolean        @default(true)
   createdAt DateTime       @default(now())
-  updatedAt DateTime       @updatedAt
-  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  bots      TelegramBot[]
+  config    TelegramConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+
+  @@unique([configId, channelId])
+  @@index([configId])
 }
 
 model TelegramBot {
@@ -67,6 +85,7 @@ model File {
   mimeType        String
   telegramFileId  String?      // null for chunked files
   telegramMsgId   Int?         // null for chunked files
+  channelId       String?      // Channel where file is stored (for non-chunked files)
   isChunked       Boolean      @default(false)
   totalChunks     Int?
   folderId        String?
@@ -87,6 +106,7 @@ model FileChunk {
   chunkIndex      Int
   telegramFileId  String
   telegramMsgId   Int
+  channelId       String?  // Channel where this chunk is stored
   size            BigInt
   createdAt       DateTime @default(now())
   file            File     @relation(fields: [fileId], references: [id], onDelete: Cascade)
@@ -94,3 +114,4 @@ model FileChunk {
   @@unique([fileId, chunkIndex])
   @@index([fileId])
 }
+

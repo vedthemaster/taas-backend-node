@@ -162,23 +162,50 @@ export const uploadFile = async (req: AuthRequest, res: Response): Promise<void>
             include: { bots: { where: { isActive: true } } },
         });
 
-        if (!config || (config as any).bots.length === 0) {
-            res.status(400).json({ error: 'No bots configured. Please add at least one bot in settings.' });
+        if (!config) {
+            res.status(400).json({ error: 'No Telegram configuration found. Please complete setup.' });
             return;
         }
 
-        const botTokens = (config as any).bots.map((b: any) => b.botToken);
+        // Get bot tokens - use system bots if user has useSystemBots=true
+        let botTokens: string[];
+        if (config.useSystemBots) {
+            const { getSystemBotTokens } = await import('./botController');
+            botTokens = getSystemBotTokens();
+            if (botTokens.length === 0) {
+                res.status(500).json({ error: 'System bots not configured. Please contact administrator.' });
+                return;
+            }
+        } else {
+            if ((config as any).bots.length === 0) {
+                res.status(400).json({ error: 'No bots configured. Please add at least one bot in settings.' });
+                return;
+            }
+            botTokens = (config as any).bots.map((b: any) => b.botToken);
+        }
 
-        // Upload file to Telegram via Python service
-        const { uploadToTelegram } = await import('../lib/pythonService');
-        const result = await uploadToTelegram(
-            {
-                channelId: config.channelId,
-                botTokens,
-            },
-            file.path,
+        // Read file into buffer for upload
+        const fileBuffer = fs.readFileSync(file.path);
+
+        // Get available bot from pool
+        const { getBotPool } = await import('../lib/telegramBotPool');
+        const { uploadChunkToTelegram } = await import('../lib/telegramStreamApi');
+        const botPool = getBotPool(config.channelId, botTokens);
+        const botToken = await botPool.getAvailableBot();
+
+        // Upload file to Telegram directly
+        console.log(`📤 UPLOAD: ${file.originalname} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`);
+        const result = await uploadChunkToTelegram(
+            fileBuffer,
+            config.channelId,
+            botToken,
+            file.originalname,
             `📁 ${file.originalname}`
         );
+        console.log(`✅ UPLOAD COMPLETE: ${file.originalname}`);
+
+        // Clean up temp file
+        fs.unlinkSync(file.path);
 
         // Verify folder belongs to user if provided
         if (folderId) {
@@ -204,8 +231,8 @@ export const uploadFile = async (req: AuthRequest, res: Response): Promise<void>
                 name: uniqueFilename,
                 size: BigInt(file.size),
                 mimeType: file.mimetype,
-                telegramFileId: result.file_id,
-                telegramMsgId: result.message_id,
+                telegramFileId: result.fileId,
+                telegramMsgId: result.messageId,
                 folderId: folderId || null,
                 userId,
             },
@@ -250,12 +277,27 @@ export const downloadFile = async (req: AuthRequest, res: Response): Promise<voi
             include: { bots: { where: { isActive: true } } },
         });
 
-        if (!config || (config as any).bots.length === 0) {
-            res.status(400).json({ error: 'No bots configured' });
+        if (!config) {
+            res.status(400).json({ error: 'No Telegram configuration found' });
             return;
         }
 
-        const botTokens = (config as any).bots.map((b: any) => b.botToken);
+        // Get bot tokens - use system bots if user has useSystemBots=true
+        let botTokens: string[];
+        if (config.useSystemBots) {
+            const { getSystemBotTokens } = await import('./botController');
+            botTokens = getSystemBotTokens();
+            if (botTokens.length === 0) {
+                res.status(500).json({ error: 'System bots not configured' });
+                return;
+            }
+        } else {
+            if ((config as any).bots.length === 0) {
+                res.status(400).json({ error: 'No bots configured' });
+                return;
+            }
+            botTokens = (config as any).bots.map((b: any) => b.botToken);
+        }
 
         // Handle chunked files
         if (file.isChunked) {
@@ -266,29 +308,37 @@ export const downloadFile = async (req: AuthRequest, res: Response): Promise<voi
 
             // Set headers for streaming
             res.setHeader('Content-Type', file.mimeType);
-            res.setHeader('Content-Disposition', `attachment; filename="${file.name}"`);
+            res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.name)}"`);
             res.setHeader('Content-Length', file.size.toString());
 
-            // Use Python service for streaming download by file_ids (memory-efficient)
-            const { downloadByFileIdsStream } = await import('../lib/pythonService');
+            // Use new streaming API for download
+            const { downloadFileFromTelegram } = await import('../lib/telegramStreamApi');
+            const { getBotPool } = await import('../lib/telegramBotPool');
+            const botPool = getBotPool(config.channelId, botTokens);
 
-            // Use file_id for downloads (stored during upload)
-            const fileIds = (file as any).chunks.map((c: any) => c.telegramFileId);
+            console.log(`📥 DOWNLOAD: ${file.name} (${(file as any).chunks.length} chunks)`);
 
-            const { stream } = await downloadByFileIdsStream(
-                {
-                    channelId: config.channelId,
-                    botTokens,
-                },
-                fileIds
-            );
+            // Stream chunks in order
+            for (const chunk of (file as any).chunks) {
+                const token = await botPool.getAvailableBot();
+                const { stream } = await downloadFileFromTelegram(chunk.telegramFileId, token);
 
-            // Pipe stream directly to client (memory-efficient)
-            stream.pipe(res);
+                // Pipe chunk to response
+                await new Promise<void>((resolve, reject) => {
+                    stream.on('data', (data: Buffer) => {
+                        res.write(data);
+                    });
+                    stream.on('end', resolve);
+                    stream.on('error', reject);
+                });
+            }
+
+            res.end();
+            console.log(`✅ DOWNLOAD COMPLETE: ${file.name}`);
             return;
         }
 
-        // Standard file download (non-chunked) - use Python service with single file_id
+        // Standard file download (non-chunked) - use new streaming API
         if (!file.telegramFileId) {
             res.status(400).json({ error: 'File has no Telegram file ID' });
             return;
@@ -296,24 +346,24 @@ export const downloadFile = async (req: AuthRequest, res: Response): Promise<voi
 
         // Set response headers
         res.setHeader('Content-Type', file.mimeType);
-        res.setHeader('Content-Disposition', `attachment; filename="${file.name}"`);
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.name)}"`);
         res.setHeader('Content-Length', file.size.toString());
 
-        // Use Python service for single file download
-        const { downloadByFileIdsStream } = await import('../lib/pythonService');
+        // Use new streaming API for download
+        const { downloadFileFromTelegram } = await import('../lib/telegramStreamApi');
+        const { getBotPool } = await import('../lib/telegramBotPool');
+        const botPool = getBotPool(config.channelId, botTokens);
+        const token = await botPool.getAvailableBot();
 
-        const { stream } = await downloadByFileIdsStream(
-            {
-                channelId: config.channelId,
-                botTokens,
-            },
-            [file.telegramFileId] // Single file as array
-        );
-
+        console.log(`📥 DOWNLOAD: ${file.name}`);
+        const { stream } = await downloadFileFromTelegram(file.telegramFileId, token);
         stream.pipe(res);
+        console.log(`✅ DOWNLOAD COMPLETE: ${file.name}`);
     } catch (error) {
         console.error('Download file error:', error);
-        res.status(500).json({ error: 'Failed to download file' });
+        if (!res.headersSent) {
+            res.status(500).json({ error: 'Failed to download file' });
+        }
     }
 };
 

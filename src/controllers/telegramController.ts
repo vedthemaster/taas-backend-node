@@ -10,16 +10,16 @@ const telegramClients: Map<string, TelegramClient> = new Map();
 export const setupTelegram = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const userId = req.userId;
-        const { botToken, channelId, apiId, apiHash } = req.body;
+        const { botToken, channelId } = req.body;
 
         if (!userId) {
             res.status(401).json({ error: 'Not authenticated' });
             return;
         }
 
-        if (!botToken || !channelId || !apiId || !apiHash) {
+        if (!botToken || !channelId) {
             res.status(400).json({
-                error: 'Bot token, channel ID, API ID, and API hash are required'
+                error: 'Bot token and channel ID are required'
             });
             return;
         }
@@ -30,25 +30,23 @@ export const setupTelegram = async (req: AuthRequest, res: Response): Promise<vo
         });
 
         if (existingConfig) {
-            // Update existing config
+            // Update existing config - mark as using own bots
             await prisma.telegramConfig.update({
                 where: { userId },
                 data: {
                     botToken,
                     channelId,
-                    apiId,
-                    apiHash,
+                    useSystemBots: false,
                 },
             });
         } else {
-            // Create new config
+            // Create new config with own bot
             await prisma.telegramConfig.create({
                 data: {
                     userId,
                     botToken,
                     channelId,
-                    apiId,
-                    apiHash,
+                    useSystemBots: false,
                 },
             });
         }
@@ -60,6 +58,61 @@ export const setupTelegram = async (req: AuthRequest, res: Response): Promise<vo
     } catch (error) {
         console.error('Setup telegram error:', error);
         res.status(500).json({ error: 'Failed to save Telegram configuration' });
+    }
+};
+
+// Skip setup - use system bots with 100MB limit
+export const skipSetup = async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        const userId = req.userId;
+
+        if (!userId) {
+            res.status(401).json({ error: 'Not authenticated' });
+            return;
+        }
+
+        const systemChannelId = process.env.SYSTEM_CHANNEL_ID;
+        if (!systemChannelId) {
+            res.status(500).json({ error: 'System configuration not available' });
+            return;
+        }
+
+        // Check if user already has telegram config
+        const existingConfig = await prisma.telegramConfig.findUnique({
+            where: { userId },
+        });
+
+        if (existingConfig) {
+            // Update to use system bots
+            await prisma.telegramConfig.update({
+                where: { userId },
+                data: {
+                    channelId: systemChannelId,
+                    useSystemBots: true,
+                    botToken: null,
+                    apiId: null,
+                    apiHash: null,
+                },
+            });
+        } else {
+            // Create config with system bots
+            await prisma.telegramConfig.create({
+                data: {
+                    userId,
+                    channelId: systemChannelId,
+                    useSystemBots: true,
+                },
+            });
+        }
+
+        res.json({
+            message: 'Setup skipped - using system bots with 100MB limit',
+            configured: true,
+            useSystemBots: true,
+        });
+    } catch (error) {
+        console.error('Skip setup error:', error);
+        res.status(500).json({ error: 'Failed to skip setup' });
     }
 };
 

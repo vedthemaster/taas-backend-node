@@ -3,7 +3,8 @@ import prisma from '../lib/prisma';
 import { AuthRequest } from '../middleware/authMiddleware';
 import axios from 'axios';
 
-const PYTHON_SERVICE_URL = process.env.PYTHON_SERVICE_URL || 'http://localhost:5001';
+// Telegram Bot API URL
+const TELEGRAM_API_URL = 'https://api.telegram.org';
 
 /**
  * Get all bots for the current user
@@ -60,13 +61,29 @@ export const addBot = async (req: AuthRequest, res: Response): Promise<void> => 
             return;
         }
 
-        // Verify the bot token with Python service
-        const verification = await axios.post(`${PYTHON_SERVICE_URL}/verify-bot`, {
-            bot_token: botToken,
-        });
+        // Verify the bot token directly with Telegram API
+        let verification: { valid: boolean; data?: { username: string }; error?: string };
 
-        if (!verification.data.valid) {
-            res.status(400).json({ error: `Invalid bot token: ${verification.data.error}` });
+        try {
+            const response = await axios.get(`${TELEGRAM_API_URL}/bot${botToken}/getMe`, {
+                timeout: 10000,
+            });
+
+            if (response.data.ok && response.data.result) {
+                verification = {
+                    valid: true,
+                    data: { username: response.data.result.username },
+                };
+            } else {
+                verification = { valid: false, error: 'Invalid response from Telegram' };
+            }
+        } catch (err: any) {
+            const errorMsg = err.response?.data?.description || err.message || 'Failed to verify bot';
+            verification = { valid: false, error: errorMsg };
+        }
+
+        if (!verification.valid) {
+            res.status(400).json({ error: `Invalid bot token: ${verification.error}` });
             return;
         }
 
@@ -85,8 +102,32 @@ export const addBot = async (req: AuthRequest, res: Response): Promise<void> => 
                 data: {
                     userId,
                     channelId,
+                    useSystemBots: false,
                 },
             });
+        } else if (config.useSystemBots) {
+            // User was using system bots, now adding their own - update to own channel
+            if (!channelId) {
+                res.status(400).json({ error: 'Channel ID is required when switching from system bots' });
+                return;
+            }
+            await prisma.telegramConfig.update({
+                where: { userId },
+                data: {
+                    useSystemBots: false,
+                    channelId,
+                },
+            });
+            // Refresh config
+            config = await prisma.telegramConfig.findUnique({
+                where: { userId },
+            });
+        }
+
+        // Ensure config exists after potential creation/refresh
+        if (!config) {
+            res.status(500).json({ error: 'Failed to get Telegram configuration' });
+            return;
         }
 
         // Check if bot already exists
@@ -107,7 +148,7 @@ export const addBot = async (req: AuthRequest, res: Response): Promise<void> => 
             data: {
                 configId: config.id,
                 botToken,
-                botUsername: verification.data.username,
+                botUsername: verification.data?.username || 'Unknown',
             },
         });
 
@@ -202,6 +243,7 @@ export const updateChannelId = async (req: AuthRequest, res: Response): Promise<
 
 /**
  * Get bot tokens for a user (internal use)
+ * Returns system bots if user has useSystemBots=true
  */
 export const getBotTokensForUser = async (userId: string): Promise<string[]> => {
     const config = await prisma.telegramConfig.findUnique({
@@ -209,9 +251,39 @@ export const getBotTokensForUser = async (userId: string): Promise<string[]> => 
         include: { bots: { where: { isActive: true } } },
     });
 
-    if (!config || config.bots.length === 0) {
+    if (!config) {
+        return [];
+    }
+
+    // If user is using system bots, return system bot tokens
+    if (config.useSystemBots) {
+        return getSystemBotTokens();
+    }
+
+    // Otherwise return user's own bots
+    if (config.bots.length === 0) {
         return [];
     }
 
     return config.bots.map((b) => b.botToken);
+};
+
+/**
+ * Get system bot tokens from environment
+ */
+export const getSystemBotTokens = (): string[] => {
+    const tokens = process.env.SYSTEM_BOT_TOKENS || '';
+    if (!tokens) return [];
+    return tokens.split(',').map(t => t.trim()).filter(t => t.length > 0);
+};
+
+/**
+ * Check if user is using system bots (for file size limit enforcement)
+ */
+export const isUsingSystemBots = async (userId: string): Promise<boolean> => {
+    const config = await prisma.telegramConfig.findUnique({
+        where: { userId },
+        select: { useSystemBots: true },
+    });
+    return config?.useSystemBots ?? false;
 };

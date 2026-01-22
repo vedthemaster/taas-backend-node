@@ -6,6 +6,7 @@ import telegramRoutes from './routes/telegramRoutes';
 import folderRoutes from './routes/folderRoutes';
 import fileRoutes from './routes/fileRoutes';
 import botRoutes from './routes/botRoutes';
+import channelRoutes from './routes/channelRoutes';
 
 dotenv.config();
 
@@ -43,6 +44,7 @@ app.use('/api/telegram', telegramRoutes);
 app.use('/api/folders', folderRoutes);
 app.use('/api/files', fileRoutes);
 app.use('/api/bots', botRoutes);
+app.use('/api/channels', channelRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
